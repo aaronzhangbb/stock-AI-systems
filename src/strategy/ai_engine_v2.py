@@ -432,3 +432,204 @@ def split_by_time(X: pd.DataFrame, y: pd.Series, meta: pd.DataFrame,
         'meta_val': meta[val_mask],
         'meta_test': meta[test_mask],
     }
+
+
+# ============================================================
+# AI评分引擎 — 每日全市场打分
+# ============================================================
+
+class AIScorer:
+    """
+    AI评分引擎 V2
+    加载训练好的XGBoost模型，给全市场股票实时打分
+    """
+    
+    EXCLUDE_COLS = ['stock_code', 'date', 'open', 'high', 'low', 'close',
+                    'volume', 'amount', 'amplitude', 'pctChg', 'change', 'turnover']
+    
+    def __init__(self, model_path: str = None):
+        import xgboost as xgb
+        
+        if model_path is None:
+            model_path = os.path.join(
+                os.path.dirname(__file__), '..', '..', 'data', 'xgb_v2_model.json'
+            )
+        
+        self.model_path = os.path.abspath(model_path)
+        self.model = None
+        self.feature_names = None
+        self._load_model()
+    
+    def _load_model(self):
+        """加载训练好的模型"""
+        import xgboost as xgb
+        
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(f"模型文件不存在: {self.model_path}")
+        
+        self.model = xgb.Booster()
+        self.model.load_model(self.model_path)
+        
+        # 从模型获取特征名
+        self.feature_names = self.model.feature_names
+    
+    def score_single(self, df: pd.DataFrame) -> Optional[Dict]:
+        """
+        对单只股票打分
+        
+        参数:
+            df: 该股票的历史K线DataFrame (需至少100行)
+        
+        返回:
+            dict: {score, probability, features} 或 None
+        """
+        import xgboost as xgb
+        
+        if df is None or len(df) < 100:
+            return None
+        
+        try:
+            data = compute_v2_features(df)
+            if data.empty or len(data) < 65:
+                return None
+            
+            # 取最后一行
+            last_row = data.iloc[-1:]
+            
+            # 提取特征
+            feat_cols = [c for c in last_row.columns if c not in self.EXCLUDE_COLS]
+            X = last_row[feat_cols].copy()
+            
+            # 处理缺失/无穷值
+            X = X.replace([np.inf, -np.inf], np.nan)
+            
+            # 确保特征列与模型匹配
+            if self.feature_names is not None:
+                missing = set(self.feature_names) - set(X.columns)
+                for col in missing:
+                    X[col] = np.nan
+                X = X[self.feature_names]
+            
+            dmat = xgb.DMatrix(X, feature_names=list(X.columns))
+            prob = float(self.model.predict(dmat)[0])
+            
+            # 转换为0-100评分
+            score = round(prob * 100, 1)
+            
+            # 收集关键指标
+            close = float(data.iloc[-1]['close'])
+            features = {}
+            for col in ['volatility_20d', 'volatility_10d', 'ma60_diff', 'bb_pos',
+                        'ret_5d', 'vol_ratio_5d', 'rsi_14', 'macd_hist']:
+                v = data.iloc[-1].get(col)
+                if v is not None and not pd.isna(v):
+                    features[col] = round(float(v), 4)
+            
+            return {
+                'score': score,
+                'probability': round(prob, 4),
+                'close': close,
+                'features': features,
+            }
+        except Exception:
+            return None
+    
+    def scan_market(self, cache, pool, 
+                    top_n: int = 50,
+                    progress_callback=None) -> pd.DataFrame:
+        """
+        全市场AI评分扫描
+        
+        参数:
+            cache: DataCache 实例
+            pool: StockPool 实例
+            top_n: 返回评分最高的前N只
+            progress_callback: 进度回调 fn(current, total)
+        
+        返回:
+            DataFrame: 排序后的全市场评分结果
+        """
+        import xgboost as xgb
+        
+        tradeable = pool.get_tradeable_stocks()
+        cached = cache.get_all_cached_stocks()
+        tradeable_codes = set(tradeable['stock_code'].values)
+        cached_codes = set(cached['stock_code'].values)
+        valid_codes = sorted(tradeable_codes & cached_codes)
+        
+        # 名称/行业映射
+        code_info = {}
+        for _, row in tradeable.iterrows():
+            code_info[row['stock_code']] = {
+                'name': row.get('stock_name', ''),
+                'board': row.get('board_name', ''),
+            }
+        
+        results = []
+        total = len(valid_codes)
+        
+        for i, code in enumerate(valid_codes):
+            if progress_callback and (i + 1) % 200 == 0:
+                progress_callback(i + 1, total)
+            
+            try:
+                df = cache.load_kline(code)
+                if df is None or len(df) < 100:
+                    continue
+                
+                data = compute_v2_features(df)
+                if data.empty or len(data) < 65:
+                    continue
+                
+                last_row = data.iloc[-1:]
+                feat_cols = [c for c in last_row.columns if c not in self.EXCLUDE_COLS]
+                X = last_row[feat_cols].copy()
+                X = X.replace([np.inf, -np.inf], np.nan)
+                
+                if self.feature_names is not None:
+                    missing = set(self.feature_names) - set(X.columns)
+                    for col in missing:
+                        X[col] = np.nan
+                    X = X[self.feature_names]
+                
+                dmat = xgb.DMatrix(X, feature_names=list(X.columns))
+                prob = float(self.model.predict(dmat)[0])
+                score = round(prob * 100, 1)
+                
+                close = float(data.iloc[-1]['close'])
+                info = code_info.get(code, {})
+                
+                # 收集关键指标
+                vol20 = data.iloc[-1].get('volatility_20d')
+                bb = data.iloc[-1].get('bb_pos')
+                rsi = data.iloc[-1].get('rsi_14')
+                ret5 = data.iloc[-1].get('ret_5d')
+                vol_r = data.iloc[-1].get('vol_ratio_5d')
+                ma60d = data.iloc[-1].get('ma60_diff')
+                
+                results.append({
+                    'stock_code': code,
+                    'stock_name': info.get('name', ''),
+                    'board_name': info.get('board', ''),
+                    'ai_score': score,
+                    'probability': round(prob, 4),
+                    'close': close,
+                    'volatility_20d': round(float(vol20), 4) if vol20 is not None and not pd.isna(vol20) else None,
+                    'bb_pos': round(float(bb), 4) if bb is not None and not pd.isna(bb) else None,
+                    'rsi_14': round(float(rsi), 1) if rsi is not None and not pd.isna(rsi) else None,
+                    'ret_5d': round(float(ret5) * 100, 2) if ret5 is not None and not pd.isna(ret5) else None,
+                    'vol_ratio': round(float(vol_r), 2) if vol_r is not None and not pd.isna(vol_r) else None,
+                    'ma60_diff': round(float(ma60d) * 100, 2) if ma60d is not None and not pd.isna(ma60d) else None,
+                })
+                
+            except Exception:
+                continue
+        
+        if not results:
+            return pd.DataFrame()
+        
+        df_results = pd.DataFrame(results)
+        df_results = df_results.sort_values('ai_score', ascending=False).reset_index(drop=True)
+        df_results['rank'] = range(1, len(df_results) + 1)
+        
+        return df_results

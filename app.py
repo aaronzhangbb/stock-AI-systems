@@ -974,7 +974,7 @@ elif page == "📡 每日信号":
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
         # 买入信号 Tab
-        tab_buy, tab_sell = st.tabs(["🔴 买入信号", "🟢 持仓卖出提醒"])
+        tab_buy, tab_sell, tab_ai = st.tabs(["🔴 买入信号", "🟢 持仓卖出提醒", "🤖 AI评分推荐"])
 
         with tab_buy:
             if buy_recs:
@@ -1028,6 +1028,135 @@ elif page == "📡 每日信号":
                     st.success("所有持仓状态良好，暂无卖出提醒")
             else:
                 st.info("请先在「我的持仓」中录入你买入的股票，系统才会监控并推送卖出信号")
+
+        # ---- AI评分 Tab ----
+        with tab_ai:
+            st.markdown("#### 🤖 AI评分推荐 (XGBoost V2)")
+            st.markdown("基于88个高阶特征的机器学习模型，每天给全市场股票评分。**评分越高，未来5天涨>3%的概率越大。**")
+
+            ai_scan_btn = st.button("🧠 运行AI评分扫描", type="primary", use_container_width=True)
+
+            if ai_scan_btn:
+                try:
+                    from src.strategy.ai_engine_v2 import AIScorer
+                    from src.data.data_cache import DataCache as DC2
+                    from src.data.stock_pool import StockPool as SP2
+                    ai_scorer = AIScorer()
+                    ai_cache = DC2()
+                    ai_pool = SP2()
+                    bar2 = st.progress(0)
+                    txt2 = st.empty()
+                    def ai_prog(c, t):
+                        bar2.progress(min(c / t, 1.0))
+                        txt2.text(f"AI评分: {c}/{t} ({c/t*100:.0f}%)")
+                    with st.spinner("AI正在评分全市场..."):
+                        ai_df = ai_scorer.scan_market(ai_cache, ai_pool, top_n=50, progress_callback=ai_prog)
+                    bar2.progress(1.0)
+                    txt2.empty()
+                    st.session_state['ai_scores'] = ai_df
+                    st.success(f"AI评分完成！共评分 {len(ai_df)} 只股票")
+                except Exception as e:
+                    st.error(f"AI评分失败: {e}")
+
+            # 加载已有结果
+            ai_df = st.session_state.get('ai_scores')
+            if ai_df is None:
+                try:
+                    import json as _json
+                    score_path = os.path.join('data', 'ai_daily_scores.json')
+                    if os.path.exists(score_path):
+                        with open(score_path, 'r', encoding='utf-8') as f:
+                            cached_scores = _json.load(f)
+                        if cached_scores.get('top50'):
+                            ai_df = pd.DataFrame(cached_scores['top50'])
+                            st.info(f"显示缓存结果 (扫描时间: {cached_scores.get('scan_time', 'N/A')})")
+                except Exception:
+                    pass
+
+            if ai_df is not None and not ai_df.empty:
+                # 评分分布
+                c1, c2, c3, c4 = st.columns(4)
+                above90 = len(ai_df[ai_df['ai_score'] >= 90]) if 'ai_score' in ai_df.columns else 0
+                above80 = len(ai_df[ai_df['ai_score'] >= 80]) if 'ai_score' in ai_df.columns else 0
+                above70 = len(ai_df[ai_df['ai_score'] >= 70]) if 'ai_score' in ai_df.columns else 0
+                avg_score = ai_df['ai_score'].mean() if 'ai_score' in ai_df.columns else 0
+                with c1:
+                    st.markdown(f'<div class="signal-card-buy"><div class="metric-label">90+强烈推荐</div><div class="metric-value" style="color:#e06060;">{above90}</div></div>', unsafe_allow_html=True)
+                with c2:
+                    st.markdown(f'<div class="signal-card"><div class="metric-label">80+推荐</div><div class="metric-value">{above80}</div></div>', unsafe_allow_html=True)
+                with c3:
+                    st.markdown(f'<div class="signal-card"><div class="metric-label">70+关注</div><div class="metric-value">{above70}</div></div>', unsafe_allow_html=True)
+                with c4:
+                    st.markdown(f'<div class="signal-card"><div class="metric-label">平均分</div><div class="metric-value">{avg_score:.1f}</div></div>', unsafe_allow_html=True)
+
+                st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+                # Top推荐列表
+                top_n_show = min(30, len(ai_df))
+                st.markdown(f"##### 🏆 AI评分 Top {top_n_show}")
+                display_cols = ['stock_code', 'stock_name', 'board_name', 'ai_score', 'close',
+                                'volatility_20d', 'bb_pos', 'rsi_14', 'ret_5d', 'vol_ratio', 'ma60_diff']
+                available = [c for c in display_cols if c in ai_df.columns]
+                show_df = ai_df.head(top_n_show)[available].copy()
+                col_rename = {
+                    'stock_code': '代码', 'stock_name': '名称', 'board_name': '行业',
+                    'ai_score': 'AI评分', 'close': '收盘价', 'volatility_20d': '波动率',
+                    'bb_pos': '布林位置', 'rsi_14': 'RSI', 'ret_5d': '5日涨跌%',
+                    'vol_ratio': '量比', 'ma60_diff': 'MA60偏离%'
+                }
+                show_df = show_df.rename(columns={k: v for k, v in col_rename.items() if k in show_df.columns})
+
+                st.dataframe(
+                    show_df,
+                    use_container_width=True,
+                    height=min(40 * top_n_show + 40, 800),
+                    column_config={
+                        'AI评分': st.column_config.ProgressColumn(
+                            'AI评分', min_value=0, max_value=100, format="%.1f"
+                        ),
+                    }
+                )
+
+                # Top 10 详细卡片
+                st.markdown("##### ⭐ Top 10 详细信息")
+                for _, row in ai_df.head(10).iterrows():
+                    score = row.get('ai_score', 0)
+                    score_color = '#e06060' if score >= 90 else ('#f0a050' if score >= 80 else '#5eba7d')
+                    vol20 = f"{row['volatility_20d']:.2f}" if row.get('volatility_20d') is not None else "N/A"
+                    bb = f"{row['bb_pos']:.3f}" if row.get('bb_pos') is not None else "N/A"
+                    rsi = f"{row['rsi_14']:.0f}" if row.get('rsi_14') is not None else "N/A"
+                    ret5 = f"{row['ret_5d']:+.1f}%" if row.get('ret_5d') is not None else "N/A"
+                    ma60 = f"{row['ma60_diff']:+.1f}%" if row.get('ma60_diff') is not None else "N/A"
+                    st.markdown(f"""
+<div class="signal-card" style="margin-bottom:8px;">
+<div style="display:flex;justify-content:space-between;align-items:center;">
+<div>
+<span style="color:#e2e8f0;font-weight:700;font-size:16px;">{row.get('stock_code','')} {row.get('stock_name','')}</span>
+<span style="color:#7a869a;margin-left:12px;">{row.get('board_name','')}</span>
+</div>
+<div style="color:{score_color};font-weight:900;font-size:22px;">AI {score:.1f}分</div>
+</div>
+<div style="display:flex;gap:20px;margin-top:8px;color:#94a3b8;font-size:13px;">
+<span>收盘 <b style="color:#e2e8f0;">{row.get('close',0):.2f}</b></span>
+<span>波动率 <b>{vol20}</b></span>
+<span>布林 <b>{bb}</b></span>
+<span>RSI <b>{rsi}</b></span>
+<span>5日 <b>{ret5}</b></span>
+<span>MA60 <b>{ma60}</b></span>
+</div>
+</div>
+""", unsafe_allow_html=True)
+            else:
+                st.markdown("""
+<div class="signal-card" style="text-align:center;padding:30px;">
+<div style="font-size:36px;margin-bottom:12px;">🤖</div>
+<div style="color:#cbd5e1;">点击「运行AI评分扫描」生成今日推荐</div>
+<div style="color:#7a869a;font-size:13px;margin-top:8px;">
+基于XGBoost GPU模型 · 88个V2高阶特征 · 测试集Top50精度96%
+</div>
+</div>
+""", unsafe_allow_html=True)
+
     else:
         st.markdown("""
 <div class="signal-card" style="text-align:center;padding:40px;">
