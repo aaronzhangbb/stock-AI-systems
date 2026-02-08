@@ -1,0 +1,27 @@
+# A股量化交易辅助系统 - 依赖清单
+# Python >= 3.12
+
+# 数据获取
+akshare>=1.18.0
+
+# 数据处理
+pandas>=2.0.0
+numpy>=2.0.0
+scikit-learn>=1.5.0
+requests>=2.31.0
+
+# 可视化
+plotly>=6.0.0
+streamlit>=1.50.0
+
+# 回测框架
+backtrader>=1.9.78
+
+# Windows桌面通知
+winotify>=1.1.0
+
+# AI策略V2.0 (机器学习/GPU加速)
+xgboost>=3.1.0
+lightgbm>=4.6.0
+shap>=0.50.0
+matplotlib>=3.10.0
