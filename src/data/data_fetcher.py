@@ -28,6 +28,11 @@ _rate_lock = threading.Lock()
 _last_request_time = 0
 _MIN_REQUEST_INTERVAL = 0.12  # 每次请求最少间隔（秒）
 
+# ===== 实时行情内存缓存（避免重复拉取全市场数据） =====
+_realtime_cache = None       # 缓存的 DataFrame
+_realtime_cache_time = 0     # 缓存时间戳
+_REALTIME_CACHE_TTL = 60     # 缓存有效期（秒）
+
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -417,30 +422,46 @@ def get_stock_name(stock_code: str) -> str:
 
 
 def get_realtime_quotes(stock_codes: list = None) -> pd.DataFrame:
-    """获取实时行情数据"""
-    try:
-        df = ak.stock_zh_a_spot_em()
-        df = df.rename(columns={
-            '代码': 'code', '名称': 'name', '最新价': 'close',
-            '涨跌幅': 'pctChg', '涨跌额': 'change', '成交量': 'volume',
-            '成交额': 'amount', '今开': 'open', '最高': 'high',
-            '最低': 'low', '昨收': 'pre_close', '换手率': 'turnover',
-        })
+    """获取实时行情数据（带60秒内存缓存，避免重复拉取全市场）"""
+    global _realtime_cache, _realtime_cache_time
 
-        if stock_codes:
-            codes = [_clean_stock_code(c) for c in stock_codes]
-            df = df[df['code'].isin(codes)]
+    now = time.time()
 
-        return df
+    # 如果缓存有效，直接使用
+    if _realtime_cache is not None and (now - _realtime_cache_time) < _REALTIME_CACHE_TTL:
+        df = _realtime_cache
+    else:
+        # 缓存过期或不存在，重新拉取
+        try:
+            df = ak.stock_zh_a_spot_em()
+            df = df.rename(columns={
+                '代码': 'code', '名称': 'name', '最新价': 'close',
+                '涨跌幅': 'pctChg', '涨跌额': 'change', '成交量': 'volume',
+                '成交额': 'amount', '今开': 'open', '最高': 'high',
+                '最低': 'low', '昨收': 'pre_close', '换手率': 'turnover',
+            })
+            # 更新缓存
+            _realtime_cache = df
+            _realtime_cache_time = now
+        except Exception as e:
+            print(f"获取实时行情失败: {e}")
+            return pd.DataFrame()
 
-    except Exception as e:
-        print(f"获取实时行情失败: {e}")
-        return pd.DataFrame()
+    if stock_codes:
+        codes = [_clean_stock_code(c) for c in stock_codes]
+        df = df[df['code'].isin(codes)]
+
+    return df
 
 
 def get_realtime_price(stock_code: str) -> dict:
-    """获取单只股票最新价格信息"""
+    """获取单只股票最新价格信息（优先用腾讯轻量API，秒回）"""
     code = _clean_stock_code(stock_code)
+    # 优先腾讯轻量级接口
+    result = _fetch_realtime_tencent([code])
+    if result and code in result:
+        return result[code]
+    # 降级到东方财富
     try:
         df = get_realtime_quotes([code])
         if df.empty:
@@ -458,6 +479,128 @@ def get_realtime_price(stock_code: str) -> dict:
         }
     except Exception as e:
         print(f"获取 {stock_code} 实时价格失败: {e}")
+        return {}
+
+
+def _fetch_realtime_tencent(stock_codes: list) -> dict:
+    """
+    通过腾讯行情API批量获取实时价格（轻量级，毫秒级响应）
+    适合少量股票（<100只），不拉全市场数据
+
+    参数:
+        stock_codes: 纯数字代码列表，如 ['600036', '000001']
+
+    返回:
+        dict: {code: {'code', 'name', 'close', 'open', 'high', 'low', 'volume', 'pctChg'}, ...}
+    """
+    if not stock_codes:
+        return {}
+
+    # 构造腾讯行情查询符号: sh600036, sz000001, ...
+    symbols = []
+    for c in stock_codes:
+        c = _clean_stock_code(c)
+        prefix = _get_market_prefix(c)
+        symbols.append(f"{prefix}{c}")
+
+    result = {}
+    # 腾讯API每次最多查约50只，分批
+    batch_size = 50
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i:i + batch_size]
+        query = ','.join(batch)
+        try:
+            _throttle()
+            url = f"http://qt.gtimg.cn/q={query}"
+            resp = requests.get(url, headers=_HEADERS, timeout=10)
+            resp.raise_for_status()
+            text = resp.text
+
+            for line in text.strip().split('\n'):
+                line = line.strip()
+                if not line or '~' not in line:
+                    continue
+                # 格式: v_sh600036="1~贵州茅台~600036~1812.00~..."
+                try:
+                    parts = line.split('~')
+                    if len(parts) < 46:
+                        continue
+                    code = parts[2]
+                    name = parts[1]
+                    close = float(parts[3]) if parts[3] else 0.0
+                    pre_close = float(parts[4]) if parts[4] else 0.0
+                    open_p = float(parts[5]) if parts[5] else 0.0
+                    high_p = float(parts[33]) if parts[33] else 0.0
+                    low_p = float(parts[34]) if parts[34] else 0.0
+                    volume = float(parts[6]) if parts[6] else 0.0
+                    pct_chg = float(parts[32]) if parts[32] else 0.0
+
+                    if close > 0:
+                        result[code] = {
+                            'code': code,
+                            'name': name,
+                            'close': close,
+                            'open': open_p,
+                            'high': high_p,
+                            'low': low_p,
+                            'volume': volume,
+                            'pctChg': pct_chg,
+                            'pre_close': pre_close,
+                        }
+                except (ValueError, IndexError):
+                    continue
+        except Exception as e:
+            print(f"腾讯实时行情批次失败: {e}")
+            continue
+
+    return result
+
+
+def batch_get_realtime_prices(stock_codes: list) -> dict:
+    """
+    批量获取多只股票的实时价格
+    - 少量股票（<=100只）：用腾讯API，毫秒级响应，不拉全市场
+    - 大量股票（>100只）：用东方财富全市场接口 + 60秒缓存
+
+    参数:
+        stock_codes: 股票代码列表，如 ['600036', '000001', ...]
+
+    返回:
+        dict: {code: {'code', 'name', 'close', 'open', 'high', 'low', 'volume', 'pctChg'}, ...}
+    """
+    if not stock_codes:
+        return {}
+
+    # 少量股票：用腾讯轻量级API（秒回）
+    if len(stock_codes) <= 100:
+        result = _fetch_realtime_tencent(stock_codes)
+        if result:
+            return result
+        # 腾讯失败则降级到东方财富
+
+    # 大量股票或腾讯失败：用东方财富全市场接口
+    try:
+        df = get_realtime_quotes(stock_codes)
+        if df.empty:
+            return {}
+        result = {}
+        for _, row in df.iterrows():
+            code = str(row.get('code', ''))
+            if not code:
+                continue
+            result[code] = {
+                'code': code,
+                'name': str(row.get('name', code)),
+                'close': float(row['close']) if pd.notna(row.get('close')) else 0.0,
+                'open': float(row['open']) if pd.notna(row.get('open')) else 0.0,
+                'high': float(row['high']) if pd.notna(row.get('high')) else 0.0,
+                'low': float(row['low']) if pd.notna(row.get('low')) else 0.0,
+                'volume': float(row['volume']) if pd.notna(row.get('volume')) else 0.0,
+                'pctChg': float(row['pctChg']) if pd.notna(row.get('pctChg')) else 0.0,
+            }
+        return result
+    except Exception as e:
+        print(f"批量获取实时价格失败: {e}")
         return {}
 
 

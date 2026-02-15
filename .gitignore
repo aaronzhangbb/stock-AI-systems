@@ -28,6 +28,10 @@ data/*.xlsx
 
 # Model files (large)
 data/*.model
+data/*.pt
+
+# Cursor IDE
+.cursor/
 
 # OS
 Thumbs.db

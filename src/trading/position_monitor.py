@@ -5,6 +5,7 @@
 - 检测止损 / 止盈 / 追踪止损 / 策略卖出信号
 - 生成卖出建议
 - 支持邮件推送
+- 支持盘中实时价格监控
 """
 
 import os
@@ -13,15 +14,33 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import config
-from src.data.data_fetcher import get_history_data
+from src.data.data_fetcher import get_history_data, get_realtime_price, batch_get_realtime_prices
 from src.strategy.strategies import run_all_strategies
 from src.trading.paper_trading import PaperTradingAccount
 
 
+def is_trading_time() -> bool:
+    """判断当前是否在A股交易时间内（9:30-11:30, 13:00-15:00）"""
+    now = datetime.now()
+    weekday = now.weekday()
+    if weekday >= 5:  # 周六日
+        return False
+    hour, minute = now.hour, now.minute
+    t = hour * 60 + minute
+    # 上午 9:30-11:30 = 570-690, 下午 13:00-15:00 = 780-900
+    return (570 <= t <= 690) or (780 <= t <= 900)
+
+
 def check_single_position(stock_code: str, stock_name: str, buy_price: float,
-                           buy_date: str, shares: int = 0) -> dict:
+                           buy_date: str, shares: int = 0,
+                           use_realtime: bool = False,
+                           realtime_price: float = None) -> dict:
     """
     检查单只持仓股的卖出条件
+
+    参数:
+        use_realtime: 是否使用实时价格（盘中监控时设为True）
+        realtime_price: 外部传入的实时价格（批量获取后传入，避免逐只请求）
 
     返回:
         dict: {
@@ -47,6 +66,7 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
         'alerts': [],
         'advice': '持有',
         'sell_signals': [],
+        'price_source': 'close',  # 'close' 或 'realtime'
     }
 
     try:
@@ -55,7 +75,20 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
             result['alerts'].append('无法获取行情数据')
             return result
 
+        # 优先使用外部传入的实时价格，其次尝试实时接口，最后用收盘价
         current_price = float(df['close'].iloc[-1])
+        if realtime_price is not None and realtime_price > 0:
+            current_price = float(realtime_price)
+            result['price_source'] = 'realtime'
+        elif use_realtime and is_trading_time():
+            try:
+                rt = get_realtime_price(stock_code)
+                if rt and rt.get('close', 0) > 0:
+                    current_price = float(rt['close'])
+                    result['price_source'] = 'realtime'
+            except Exception:
+                pass  # 实时价格获取失败时降级使用收盘价
+
         result['current_price'] = current_price
 
         # 计算盈亏
@@ -122,9 +155,14 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
     return result
 
 
-def check_all_manual_positions(account: PaperTradingAccount = None) -> list:
+def check_all_manual_positions(account: PaperTradingAccount = None,
+                                use_realtime: bool = False) -> list:
     """
-    检查所有手动买入跟踪的持仓
+    检查所有手动买入跟踪的持仓（批量获取实时价格，大幅提速）
+
+    参数:
+        account: 交易账户实例
+        use_realtime: 是否使用实时价格（盘中监控时设为True）
 
     返回:
         list[dict]: 每只持仓的检查结果
@@ -136,14 +174,28 @@ def check_all_manual_positions(account: PaperTradingAccount = None) -> list:
     if manual_df.empty:
         return []
 
+    # 批量获取所有持仓的实时价格（一次网络请求）
+    all_codes = manual_df['stock_code'].tolist()
+    rt_prices = {}
+    try:
+        rt_map = batch_get_realtime_prices(all_codes)
+        for code, info in rt_map.items():
+            if info.get('close', 0) > 0:
+                rt_prices[code] = info['close']
+    except Exception as e:
+        print(f"批量获取实时价格失败，将逐只获取: {e}")
+
     results = []
     for _, row in manual_df.iterrows():
+        code = row['stock_code']
         r = check_single_position(
-            stock_code=row['stock_code'],
+            stock_code=code,
             stock_name=row.get('stock_name', ''),
             buy_price=float(row['buy_price']),
             buy_date=row['buy_date'],
             shares=int(row.get('shares', 0)),
+            use_realtime=use_realtime,
+            realtime_price=rt_prices.get(code),
         )
         results.append(r)
 

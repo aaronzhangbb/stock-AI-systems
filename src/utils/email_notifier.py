@@ -88,6 +88,16 @@ def build_daily_email(buy_recs: list, sell_alerts: list, stats: dict,
                 lines.append(
                     f"   建议买入价: {bp:.2f} | 目标价: {tp:.2f} | 止损价: {sp:.2f}"
                 )
+            # 基本面标签
+            fund = sig.get('fundamental', {})
+            if fund and fund.get('label'):
+                quality = fund.get('quality', '-')
+                lines.append(f"   基本面[{quality}]: {fund['label']}")
+            # 板块标签
+            sector = sig.get('sector', {})
+            if sector and sector.get('label'):
+                heat_level = sector.get('heat_level', '')
+                lines.append(f"   板块[{heat_level}]: {sector['label']}")
             reason = sig.get('reason', '')
             if reason:
                 lines.append(f"   触发: {reason}")

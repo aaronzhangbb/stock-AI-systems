@@ -21,12 +21,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 # 特征工程 V2.0 — 100+ 高阶特征
 # ============================================================
 
-def compute_v2_features(df: pd.DataFrame) -> pd.DataFrame:
+def compute_v2_features(df: pd.DataFrame, extra_features: dict = None) -> pd.DataFrame:
     """
-    计算V2高阶特征集 (~100+ 个特征)
+    计算V2高阶特征集 (~120+ 个特征)
     
     输入: 含有 date/open/high/low/close/volume/pctChg 的 DataFrame
-    输出: 增加了100+个特征列的 DataFrame
+          extra_features: 可选的外部特征字典, 键值对会被广播为列
+                          (基本面/板块/情绪等非K线来源特征)
+    输出: 增加了特征列的 DataFrame
     """
     data = df.copy()
     data = data.sort_values('date').reset_index(drop=True)
@@ -279,7 +281,212 @@ def compute_v2_features(df: pd.DataFrame) -> pd.DataFrame:
         gross_move = close.diff().abs().rolling(p).sum()
         data[f'efficiency_{p}d'] = net_move / (gross_move + 1e-10)
     
+    # ============================================================
+    # 19. 波动率深度特征 (V3新增 — 阶段2核心)
+    # ============================================================
+    # === 19.1 波动率分位数 (当前波动率在历史中的位置) ===
+    vol_20_ann = ret.rolling(20).std() * np.sqrt(252)
+    for lookback in [60, 120, 250]:
+        lb = min(lookback, len(close) - 1)
+        data[f'vol_percentile_{lb}d'] = vol_20_ann.rolling(lb, min_periods=20).rank(pct=True)
+    
+    # === 19.2 波动率均值回归信号 ===
+    # 波动率偏离长期均值的程度 (Z-Score)
+    vol_mean_120 = vol_20_ann.rolling(120, min_periods=30).mean()
+    vol_std_120 = vol_20_ann.rolling(120, min_periods=30).std()
+    data['vol_zscore'] = (vol_20_ann - vol_mean_120) / (vol_std_120 + 1e-10)
+    
+    # === 19.3 波动率收缩/扩张信号 (关键！高波→低波常伴随方向性突破) ===
+    vol_5 = ret.rolling(5).std() * np.sqrt(252)
+    vol_10 = ret.rolling(10).std() * np.sqrt(252)
+    data['vol_contraction_5_20'] = vol_5 / (vol_20_ann + 1e-10)    # <1 = 短期波动收缩
+    data['vol_contraction_10_60'] = vol_10 / (data.get('volatility_60d', vol_20_ann) + 1e-10)
+    
+    # 波动率收缩速度 (连续几天在收缩)
+    vol_shrinking = (vol_20_ann < vol_20_ann.shift(1)).astype(int)
+    data['vol_shrink_streak'] = vol_shrinking.groupby(
+        (vol_shrinking != vol_shrinking.shift()).cumsum()
+    ).cumsum()
+    
+    # === 19.4 波动率斜率 (波动率变化的方向和速度) ===
+    data['vol_slope_5d'] = vol_20_ann.pct_change(5)
+    data['vol_slope_10d'] = vol_20_ann.pct_change(10)
+    data['vol_accel'] = data['vol_slope_5d'] - data['vol_slope_5d'].shift(5)  # 波动率加速度
+    
+    # === 19.5 实现波动率 vs 隐含波动率代理 ===
+    # 用 ATR 相对值作为"隐含波动率"代理
+    atr_ann = (data['atr_14'] / close) * np.sqrt(252)
+    data['realized_vs_implied'] = vol_20_ann / (atr_ann + 1e-10)
+    
+    # === 19.6 上行/下行波动率分离 (非常重要!) ===
+    up_ret = ret.where(ret > 0, 0)
+    down_ret = ret.where(ret < 0, 0)
+    up_vol = up_ret.rolling(20).std() * np.sqrt(252)
+    down_vol = down_ret.rolling(20).std() * np.sqrt(252)
+    data['vol_upside_20d'] = up_vol
+    data['vol_downside_20d'] = down_vol
+    data['vol_asymmetry'] = up_vol / (down_vol + 1e-10)  # >1 = 上行波动更大(利好)
+    
+    # === 19.7 波动率锥 (Volatility Cone) — 不同窗口的波动率关系 ===
+    data['vol_term_structure'] = vol_5 / (vol_20_ann + 1e-10)  # 短/中期
+    vol_60_ann = ret.rolling(60).std() * np.sqrt(252)
+    data['vol_term_structure_long'] = vol_20_ann / (vol_60_ann + 1e-10)  # 中/长期
+    
+    # === 19.8 极端波动日统计 ===
+    abs_ret = ret.abs()
+    ret_p90 = abs_ret.rolling(60, min_periods=20).quantile(0.9)
+    data['extreme_vol_days_10'] = (abs_ret > ret_p90).rolling(10).sum()  # 近10日极端波动天数
+    data['extreme_vol_days_20'] = (abs_ret > ret_p90).rolling(20).sum()
+    
+    # === 19.9 Parkinson波动率 (用High-Low估计，比收盘价波动率更准) ===
+    hl_ratio = np.log(high / (low + 1e-10))
+    data['parkinson_vol_20'] = np.sqrt(
+        hl_ratio.pow(2).rolling(20).mean() / (4 * np.log(2))
+    ) * np.sqrt(252)
+    
+    # === 19.10 Garman-Klass波动率 (综合OHLC) ===
+    hl2 = 0.5 * np.log(high / (low + 1e-10)).pow(2)
+    co2 = (2 * np.log(2) - 1) * np.log(close / (open_ + 1e-10)).pow(2)
+    data['gk_vol_20'] = np.sqrt((hl2 - co2).rolling(20).mean()) * np.sqrt(252)
+    
+    # ============================================================
+    # 20. 精选交互特征 (V3新增 — 高重要性因子交叉)
+    # ============================================================
+    # 波动率 × 均线偏离 (高波动 + 超跌 = 强反弹信号)
+    data['vol_x_ma60dev'] = vol_20_ann * data['ma60_diff'].abs()
+    data['vol_x_ma30dev'] = vol_20_ann * data['ma30_diff'].abs()
+    
+    # 波动率 × 布林位置 (高波动 + 布林下轨 = 机会)
+    data['vol_x_bbpos'] = vol_20_ann * (1 - data['bb_pos'].clip(0, 1))
+    
+    # 波动率 × RSI (高波动 + RSI超卖)
+    data['vol_x_rsi_inv'] = vol_20_ann * (1 - data['rsi_14'] / 100)
+    
+    # 波动率收缩 × 量能萎缩 (双重收缩 → 即将爆发)
+    data['vol_shrink_x_vol_dry'] = data['vol_contraction_5_20'] * data['vol_shrink']
+    
+    # 时间 × 波动率 (某些月份高波动更有效)
+    if 'month' in data.columns:
+        data['month_x_vol'] = data['month'] * vol_20_ann
+    
+    # 动量 × 波动率 (高波动环境下的动量)
+    data['momentum_x_vol'] = data.get('ret_5d', ret.rolling(5).sum()) * vol_20_ann
+    
+    # 量价关系 × 波动率
+    data['vol_price_corr_x_vol'] = data.get('vol_price_corr_20', 0) * vol_20_ann
+    
+    # ============================================================
+    # 21. 外部特征注入 (基本面/板块/情绪 — 非K线来源)
+    # ============================================================
+    if extra_features:
+        for key, value in extra_features.items():
+            data[key] = value  # 标量会自动广播到所有行
+    
     return data
+
+
+# ============================================================
+# 外部特征构建器 — 基本面 / 板块 / 情绪
+# ============================================================
+
+def build_extra_features(stock_code: str,
+                         board_name: str = '',
+                         bulk_valuation: pd.DataFrame = None,
+                         industry_benchmarks: dict = None,
+                         sector_heat: dict = None,
+                         sentiment_data: dict = None) -> dict:
+    """
+    为单只股票构建外部特征字典 (传给 compute_v2_features 的 extra_features 参数)
+    
+    参数:
+        stock_code: 股票代码
+        board_name: 行业板块名称
+        bulk_valuation: 全市场估值DataFrame (来自 fetch_bulk_valuation)
+        industry_benchmarks: 行业PE/PB分位数 (来自 get_industry_benchmarks)
+        sector_heat: 板块热度数据 (来自 get_sector_heat_map)
+        sentiment_data: 市场情绪数据 (来自 get_market_sentiment)
+    
+    返回:
+        dict: 可直接传给 compute_v2_features 的 extra_features
+    """
+    # 初始化所有16个外部特征为NaN (确保模型特征名称完整)
+    feats = {
+        # 基本面 (8个)
+        'f_pe': np.nan, 'f_pb': np.nan, 'f_mv_log': np.nan,
+        'f_turnover': np.nan, 'f_volume_ratio': np.nan, 'f_is_loss': np.nan,
+        'f_pe_rank': np.nan, 'f_pb_rank': np.nan,
+        # 板块 (3个)
+        'f_sector_heat': np.nan, 'f_sector_pct': np.nan, 'f_sector_flow': np.nan,
+        # 市场情绪 (5个)
+        'f_sentiment': np.nan, 'f_sent_activity': np.nan,
+        'f_sent_volume': np.nan, 'f_sent_fund': np.nan, 'f_sent_north': np.nan,
+    }
+    
+    # ---- 基本面特征 ----
+    if bulk_valuation is not None and not bulk_valuation.empty:
+        row = bulk_valuation[bulk_valuation['stock_code'] == stock_code]
+        if not row.empty:
+            r = row.iloc[0]
+            pe = r.get('pe')
+            pb = r.get('pb')
+            total_mv = r.get('total_mv')
+            turnover = r.get('turnover')
+            vol_ratio = r.get('volume_ratio')
+            
+            # PE (负值表示亏损, 标记为NaN让模型自行处理)
+            feats['f_pe'] = float(pe) if pd.notna(pe) and pe > 0 else np.nan
+            # PB
+            feats['f_pb'] = float(pb) if pd.notna(pb) and pb > 0 else np.nan
+            # log市值 (对数化处理大范围差异)
+            feats['f_mv_log'] = float(np.log(total_mv + 1)) if pd.notna(total_mv) and total_mv > 0 else np.nan
+            # 换手率
+            feats['f_turnover'] = float(turnover) if pd.notna(turnover) else np.nan
+            # 量比
+            feats['f_volume_ratio'] = float(vol_ratio) if pd.notna(vol_ratio) else np.nan
+            # 是否亏损 (二值特征)
+            feats['f_is_loss'] = 1.0 if pd.notna(pe) and pe < 0 else 0.0
+            
+            # 行业相对估值分位数
+            if industry_benchmarks and board_name:
+                ind = industry_benchmarks.get(board_name, {})
+                pe_q25 = ind.get('pe_q25')
+                pe_q75 = ind.get('pe_q75')
+                pb_q25 = ind.get('pb_q25')
+                pb_q75 = ind.get('pb_q75')
+                
+                # PE分位数: 0=便宜, 0.5=中位, 1=贵
+                if pe_q25 is not None and pe_q75 is not None and pd.notna(pe) and pe > 0:
+                    if pe_q75 > pe_q25:
+                        feats['f_pe_rank'] = float(np.clip((pe - pe_q25) / (pe_q75 - pe_q25), 0, 2))
+                    else:
+                        feats['f_pe_rank'] = 0.5
+                
+                # PB分位数
+                if pb_q25 is not None and pb_q75 is not None and pd.notna(pb) and pb > 0:
+                    if pb_q75 > pb_q25:
+                        feats['f_pb_rank'] = float(np.clip((pb - pb_q25) / (pb_q75 - pb_q25), 0, 2))
+                    else:
+                        feats['f_pb_rank'] = 0.5
+    
+    # ---- 板块特征 ----
+    if sector_heat is not None:
+        sector_map = sector_heat.get('sector_map', {})
+        if board_name and board_name in sector_map:
+            s = sector_map[board_name]
+            feats['f_sector_heat'] = float(s.get('heat_score', 50))
+            feats['f_sector_pct'] = float(s.get('pct_change', 0))
+            feats['f_sector_flow'] = float(s.get('main_net_pct', 0))
+    
+    # ---- 市场情绪特征 ----
+    if sentiment_data is not None:
+        feats['f_sentiment'] = float(sentiment_data.get('sentiment_score', 50))
+        sub = sentiment_data.get('sub_scores', {})
+        feats['f_sent_activity'] = float(sub.get('activity', 50))
+        feats['f_sent_volume'] = float(sub.get('volume', 50))
+        feats['f_sent_fund'] = float(sub.get('fund_flow', 50))
+        feats['f_sent_north'] = float(sub.get('northbound', 50))
+    
+    return feats
 
 
 # ============================================================
@@ -318,9 +525,13 @@ def build_dataset(cache, pool,
                   future_days: int = 5, 
                   target_return: float = 0.03,
                   min_bars: int = 100,
-                  progress_callback=None) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+                  progress_callback=None,
+                  use_extra_features: bool = True) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     """
     构建全市场训练数据集
+    
+    参数:
+        use_extra_features: 是否加载基本面/板块等外部特征 (默认True)
     
     返回:
         X: 特征矩阵
@@ -332,6 +543,24 @@ def build_dataset(cache, pool,
     tradeable_codes = set(tradeable['stock_code'].values)
     cached_codes = set(cached['stock_code'].values)
     valid_codes = sorted(tradeable_codes & cached_codes)
+    
+    # 构建 stock_code → board_name 映射
+    code_board = {}
+    for _, row in tradeable.iterrows():
+        code_board[row['stock_code']] = row.get('board_name', '')
+    
+    # 加载外部数据源 (训练时: 基本面用当前快照, 板块/情绪为NaN)
+    bulk_valuation = None
+    industry_benchmarks = None
+    if use_extra_features:
+        try:
+            from src.data.fundamental import fetch_bulk_valuation, get_industry_benchmarks
+            bulk_valuation = fetch_bulk_valuation(cache_minutes=180)
+            industry_benchmarks = get_industry_benchmarks(cache_minutes=180)
+            if progress_callback:
+                print(f"    [Extra] 已加载基本面数据: {len(bulk_valuation)} 只股票估值")
+        except Exception as e:
+            print(f"    [Extra] 加载基本面数据失败(跳过): {e}")
     
     all_X = []
     all_y = []
@@ -347,8 +576,21 @@ def build_dataset(cache, pool,
             if df is None or len(df) < min_bars:
                 continue
             
-            # 计算特征
-            data = compute_v2_features(df)
+            # 构建外部特征 (训练时: 基本面有值, 板块/情绪为NaN由XGBoost处理)
+            extra = None
+            if use_extra_features and bulk_valuation is not None:
+                board = code_board.get(code, '')
+                extra = build_extra_features(
+                    stock_code=code,
+                    board_name=board,
+                    bulk_valuation=bulk_valuation,
+                    industry_benchmarks=industry_benchmarks,
+                    sector_heat=None,       # 训练时无历史板块数据
+                    sentiment_data=None,    # 训练时无历史情绪数据
+                )
+            
+            # 计算特征 (技术面 + 外部特征)
+            data = compute_v2_features(df, extra_features=extra)
             if data.empty:
                 continue
             
@@ -473,12 +715,13 @@ class AIScorer:
         # 从模型获取特征名
         self.feature_names = self.model.feature_names
     
-    def score_single(self, df: pd.DataFrame) -> Optional[Dict]:
+    def score_single(self, df: pd.DataFrame, extra_features: dict = None) -> Optional[Dict]:
         """
         对单只股票打分
         
         参数:
             df: 该股票的历史K线DataFrame (需至少100行)
+            extra_features: 外部特征字典 (基本面/板块/情绪)
         
         返回:
             dict: {score, probability, features} 或 None
@@ -489,7 +732,7 @@ class AIScorer:
             return None
         
         try:
-            data = compute_v2_features(df)
+            data = compute_v2_features(df, extra_features=extra_features)
             if data.empty or len(data) < 65:
                 return None
             
@@ -534,11 +777,266 @@ class AIScorer:
         except Exception:
             return None
     
+    def _compute_trade_advice(self, data: pd.DataFrame, close: float) -> Dict:
+        """
+        基于技术指标计算买入/卖出建议
+        
+        买入建议:
+          - buy_price: 建议买入价 (支撑位/回调位)
+          - buy_price_upper: 可接受最高买入价
+          - buy_condition: 触发买入的条件描述
+          - buy_timing: 买入时机建议
+        
+        卖出建议:
+          - sell_target: 目标止盈价
+          - sell_stop: 止损价
+          - sell_condition: 卖出条件描述
+          - hold_days: 建议持有天数
+        """
+        last = data.iloc[-1]
+        
+        try:
+            # ---- 基础价位 ----
+            high_20 = float(data['high'].tail(20).max())
+            low_20 = float(data['low'].tail(20).min())
+            high_60 = float(data['high'].tail(60).max())
+            low_60 = float(data['low'].tail(60).min())
+            
+            ma5 = float(data['close'].tail(5).mean())
+            ma10 = float(data['close'].tail(10).mean())
+            ma20 = float(data['close'].tail(20).mean())
+            ma60_val = float(data['close'].tail(60).mean()) if len(data) >= 60 else ma20
+            
+            # 布林带
+            bb_mid = ma20
+            bb_std = float(data['close'].tail(20).std())
+            bb_lower = bb_mid - 2 * bb_std
+            bb_upper = bb_mid + 2 * bb_std
+            
+            # ATR (用于止损计算)
+            atr = float(last.get('atr_14', 0)) if not pd.isna(last.get('atr_14', np.nan)) else close * 0.03
+            if atr <= 0:
+                atr = close * 0.03
+            
+            # 波动率
+            vol20d = float(last.get('volatility_20d', 0.3)) if not pd.isna(last.get('volatility_20d', np.nan)) else 0.3
+            
+            # RSI
+            rsi = float(last.get('rsi_14', 50)) if not pd.isna(last.get('rsi_14', np.nan)) else 50
+            
+            # BB位置
+            bb_pos = float(last.get('bb_pos', 0.5)) if not pd.isna(last.get('bb_pos', np.nan)) else 0.5
+            
+            # MACD
+            macd_hist = float(last.get('macd_hist', 0)) if not pd.isna(last.get('macd_hist', np.nan)) else 0
+            
+            # MA60偏离度
+            ma60_diff = float(last.get('ma60_diff', 0)) if not pd.isna(last.get('ma60_diff', np.nan)) else 0
+            
+            # ============================================================
+            # 1. 买入价格计算
+            # ============================================================
+            # 支撑位候选 (取多个支撑的加权)
+            supports = []
+            
+            # 布林带下轨支撑
+            if bb_lower > 0:
+                supports.append(('BB下轨', bb_lower, 0.25))
+            
+            # 20日最低价支撑
+            supports.append(('20日低点', low_20, 0.20))
+            
+            # MA20支撑 (如果价格在MA20附近或以上)
+            if close >= ma20 * 0.97:
+                supports.append(('MA20', ma20, 0.20))
+            
+            # MA60支撑 (长期均线)
+            if ma60_val > 0 and close >= ma60_val * 0.95:
+                supports.append(('MA60', ma60_val, 0.15))
+            
+            # 近期低点回踩
+            recent_low = float(data['low'].tail(5).min())
+            supports.append(('5日低点', recent_low, 0.20))
+            
+            # 计算加权支撑价格
+            if supports:
+                total_weight = sum(w for _, _, w in supports)
+                buy_price = sum(p * w for _, p, w in supports) / total_weight
+            else:
+                buy_price = close * 0.97
+            
+            # 确保买入价不高于当前价
+            buy_price = min(buy_price, close)
+            # 确保不低于当前价的85%（避免不合理的极低价）
+            buy_price = max(buy_price, close * 0.85)
+            
+            # 可接受最高买入价 = 当前价上浮1个ATR的一半
+            buy_upper = min(close + atr * 0.3, close * 1.02)
+            
+            # ============================================================
+            # 2. 买入条件判断
+            # ============================================================
+            buy_conditions = []
+            
+            if bb_pos <= 0.2:
+                buy_conditions.append("布林带下轨附近(超卖)")
+            elif bb_pos <= 0.4:
+                buy_conditions.append("布林带中下区间")
+            
+            if rsi <= 30:
+                buy_conditions.append(f"RSI超卖({rsi:.0f})")
+            elif rsi <= 40:
+                buy_conditions.append(f"RSI偏低({rsi:.0f})")
+            
+            if ma60_diff < -0.05:
+                buy_conditions.append(f"远离MA60({ma60_diff*100:.1f}%)超跌")
+            elif ma60_diff < -0.02:
+                buy_conditions.append(f"低于MA60({ma60_diff*100:.1f}%)")
+            
+            if macd_hist > 0:
+                buy_conditions.append("MACD金叉")
+            
+            # 量能信号
+            vol_r = float(last.get('vol_ratio_5d', 1)) if not pd.isna(last.get('vol_ratio_5d', np.nan)) else 1
+            if vol_r >= 1.5:
+                buy_conditions.append(f"放量({vol_r:.1f}倍)")
+            
+            if not buy_conditions:
+                buy_conditions.append("AI模型高分推荐")
+            
+            buy_condition_str = " + ".join(buy_conditions[:3])  # 最多显示3个
+            
+            # 买入时机
+            if bb_pos <= 0.15 and rsi <= 35:
+                buy_timing = "可立即建仓(强超卖信号)"
+            elif bb_pos <= 0.3 or rsi <= 40:
+                buy_timing = "可分批建仓(接近支撑)"
+            elif close <= buy_price * 1.01:
+                buy_timing = "接近买入价，等确认信号"
+            else:
+                buy_timing = "等回调至支撑位再入场"
+            
+            # ============================================================
+            # 3. 卖出价格计算
+            # ============================================================
+            # 止盈目标 — 基于波动率和ATR
+            # 高波动：目标更远；低波动：目标适中
+            if vol20d > 0.5:  # 高波动
+                target_ratio = 0.08  # 8%
+                hold_suggestion = "3~5天"
+            elif vol20d > 0.3:  # 中波动
+                target_ratio = 0.06  # 6%
+                hold_suggestion = "5~8天"
+            else:  # 低波动
+                target_ratio = 0.04  # 4%
+                hold_suggestion = "5~10天"
+            
+            sell_target = close * (1 + target_ratio)
+            
+            # 阻力位参考
+            resistances = []
+            if bb_upper > close:
+                resistances.append(('BB上轨', bb_upper))
+            if high_20 > close:
+                resistances.append(('20日高点', high_20))
+            if ma60_val > close:
+                resistances.append(('MA60', ma60_val))
+            
+            # 如果阻力位比目标价更近，调整目标
+            if resistances:
+                nearest_resist = min(r[1] for r in resistances)
+                if nearest_resist < sell_target and nearest_resist > close:
+                    sell_target = nearest_resist  # 以最近阻力位为目标
+            
+            # 止损价 — 基于ATR的动态止损
+            # 根据波动率调整止损幅度
+            if vol20d > 0.5:
+                stop_atr_multi = 2.0
+            elif vol20d > 0.3:
+                stop_atr_multi = 1.5
+            else:
+                stop_atr_multi = 1.2
+            
+            sell_stop = close - atr * stop_atr_multi
+            # 止损不低于当前价的92% (最大8%止损)
+            sell_stop = max(sell_stop, close * 0.92)
+            
+            # ============================================================
+            # 4. 卖出条件
+            # ============================================================
+            sell_conditions = []
+            sell_conditions.append(f"目标价{sell_target:.2f}(+{(sell_target/close-1)*100:.1f}%)")
+            sell_conditions.append(f"止损价{sell_stop:.2f}(-{(1-sell_stop/close)*100:.1f}%)")
+            
+            # 额外卖出信号
+            if vol20d > 0.4:
+                sell_conditions.append("高波动注意减仓")
+            
+            sell_condition_str = " | ".join(sell_conditions[:3])
+            
+            # 盈亏比
+            profit = sell_target - close
+            loss = close - sell_stop
+            risk_reward = round(profit / loss, 2) if loss > 0 else 99
+            
+            # 建议仓位(基于风险)
+            if risk_reward >= 3:
+                position_pct = "30%"
+                position_advice = "高盈亏比，可加大仓位"
+            elif risk_reward >= 2:
+                position_pct = "20%"
+                position_advice = "中等盈亏比"
+            elif risk_reward >= 1.5:
+                position_pct = "15%"
+                position_advice = "盈亏比一般"
+            else:
+                position_pct = "10%"
+                position_advice = "谨慎操作"
+            
+            return {
+                'buy_price': round(buy_price, 2),
+                'buy_upper': round(buy_upper, 2),
+                'buy_condition': buy_condition_str,
+                'buy_timing': buy_timing,
+                'sell_target': round(sell_target, 2),
+                'sell_stop': round(sell_stop, 2),
+                'sell_condition': sell_condition_str,
+                'hold_days': hold_suggestion,
+                'risk_reward': risk_reward,
+                'position_pct': position_pct,
+                'position_advice': position_advice,
+                'bb_lower': round(bb_lower, 2),
+                'bb_upper': round(bb_upper, 2),
+                'ma5': round(ma5, 2),
+                'ma20': round(ma20, 2),
+                'ma60': round(ma60_val, 2),
+                'atr': round(atr, 2),
+                'high_20d': round(high_20, 2),
+                'low_20d': round(low_20, 2),
+            }
+        except Exception:
+            return {
+                'buy_price': round(close * 0.97, 2),
+                'buy_upper': round(close * 1.01, 2),
+                'buy_condition': 'AI模型高分推荐',
+                'buy_timing': '等回调确认后入场',
+                'sell_target': round(close * 1.05, 2),
+                'sell_stop': round(close * 0.95, 2),
+                'sell_condition': f"目标+5% | 止损-5%",
+                'hold_days': '5~10天',
+                'risk_reward': 1.0,
+                'position_pct': '10%',
+                'position_advice': '谨慎操作',
+                'bb_lower': None, 'bb_upper': None,
+                'ma5': None, 'ma20': None, 'ma60': None,
+                'atr': None, 'high_20d': None, 'low_20d': None,
+            }
+    
     def scan_market(self, cache, pool, 
                     top_n: int = 50,
                     progress_callback=None) -> pd.DataFrame:
         """
-        全市场AI评分扫描
+        全市场AI评分扫描 (融合基本面/板块/情绪特征)
         
         参数:
             cache: DataCache 实例
@@ -565,6 +1063,42 @@ class AIScorer:
                 'board': row.get('board_name', ''),
             }
         
+        # ====== 预加载外部数据 (一次性获取, 避免重复请求) ======
+        bulk_valuation = None
+        industry_benchmarks = None
+        sector_heat = None
+        sentiment_data = None
+        
+        try:
+            from src.data.fundamental import fetch_bulk_valuation, get_industry_benchmarks
+            bulk_valuation = fetch_bulk_valuation(cache_minutes=30)
+            industry_benchmarks = get_industry_benchmarks(cache_minutes=60)
+            if progress_callback:
+                print(f"    [Scan] 已加载基本面估值: {len(bulk_valuation)} 只")
+        except Exception as e:
+            print(f"    [Scan] 基本面数据加载失败(跳过): {e}")
+        
+        try:
+            from src.data.sector_flow import get_sector_heat_map
+            sector_heat = get_sector_heat_map()
+            if progress_callback:
+                print(f"    [Scan] 已加载板块热度: {sector_heat.get('total_sectors', 0)} 个板块")
+        except Exception as e:
+            print(f"    [Scan] 板块数据加载失败(跳过): {e}")
+        
+        try:
+            # 尝试读取缓存的情绪数据 (避免每次扫描都重新采集)
+            import json
+            sentiment_path = os.path.join(
+                os.path.dirname(__file__), '..', '..', 'data', 'market_sentiment.json')
+            if os.path.exists(sentiment_path):
+                with open(sentiment_path, 'r', encoding='utf-8') as f:
+                    sentiment_data = json.load(f)
+                if progress_callback:
+                    print(f"    [Scan] 已加载情绪数据: {sentiment_data.get('sentiment_score', '?')}分")
+        except Exception:
+            pass
+        
         results = []
         total = len(valid_codes)
         
@@ -577,7 +1111,20 @@ class AIScorer:
                 if df is None or len(df) < 100:
                     continue
                 
-                data = compute_v2_features(df)
+                info = code_info.get(code, {})
+                board = info.get('board', '')
+                
+                # 构建外部特征 (预测时: 全量数据可用)
+                extra = build_extra_features(
+                    stock_code=code,
+                    board_name=board,
+                    bulk_valuation=bulk_valuation,
+                    industry_benchmarks=industry_benchmarks,
+                    sector_heat=sector_heat,
+                    sentiment_data=sentiment_data,
+                )
+                
+                data = compute_v2_features(df, extra_features=extra)
                 if data.empty or len(data) < 65:
                     continue
                 
@@ -597,7 +1144,6 @@ class AIScorer:
                 score = round(prob * 100, 1)
                 
                 close = float(data.iloc[-1]['close'])
-                info = code_info.get(code, {})
                 
                 # 收集关键指标
                 vol20 = data.iloc[-1].get('volatility_20d')
@@ -607,10 +1153,13 @@ class AIScorer:
                 vol_r = data.iloc[-1].get('vol_ratio_5d')
                 ma60d = data.iloc[-1].get('ma60_diff')
                 
+                # ====== 计算买卖建议 ======
+                advice = self._compute_trade_advice(data, close)
+                
                 results.append({
                     'stock_code': code,
                     'stock_name': info.get('name', ''),
-                    'board_name': info.get('board', ''),
+                    'board_name': board,
                     'ai_score': score,
                     'probability': round(prob, 4),
                     'close': close,
@@ -620,6 +1169,7 @@ class AIScorer:
                     'ret_5d': round(float(ret5) * 100, 2) if ret5 is not None and not pd.isna(ret5) else None,
                     'vol_ratio': round(float(vol_r), 2) if vol_r is not None and not pd.isna(vol_r) else None,
                     'ma60_diff': round(float(ma60d) * 100, 2) if ma60d is not None and not pd.isna(ma60d) else None,
+                    **advice,
                 })
                 
             except Exception:

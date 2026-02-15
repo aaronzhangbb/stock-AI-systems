@@ -91,11 +91,24 @@ class PaperTradingAccount:
                 shares INTEGER DEFAULT 0,
                 note TEXT DEFAULT '',
                 status TEXT DEFAULT 'holding',
+                sell_price REAL DEFAULT 0,
+                sell_date TEXT DEFAULT '',
+                actual_pnl REAL DEFAULT 0,
+                actual_pnl_pct REAL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(stock_code, buy_date)
             )
         ''')
+
+        # 自动迁移：为旧表添加卖出字段（如果缺失）
+        try:
+            cursor.execute('SELECT sell_price FROM manual_positions LIMIT 1')
+        except sqlite3.OperationalError:
+            cursor.execute('ALTER TABLE manual_positions ADD COLUMN sell_price REAL DEFAULT 0')
+            cursor.execute('ALTER TABLE manual_positions ADD COLUMN sell_date TEXT DEFAULT ""')
+            cursor.execute('ALTER TABLE manual_positions ADD COLUMN actual_pnl REAL DEFAULT 0')
+            cursor.execute('ALTER TABLE manual_positions ADD COLUMN actual_pnl_pct REAL DEFAULT 0')
 
         conn.commit()
 
@@ -169,7 +182,7 @@ class PaperTradingAccount:
         return df
 
     def remove_manual_position(self, stock_code: str, buy_date: str) -> None:
-        """移除手动买入跟踪记录"""
+        """移除手动买入跟踪记录（不记录卖出信息，仅状态关闭）"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
@@ -178,6 +191,73 @@ class PaperTradingAccount:
         )
         conn.commit()
         conn.close()
+
+    def sell_manual_position(self, stock_code: str, buy_date: str,
+                              sell_price: float, sell_date: str) -> dict:
+        """
+        录入卖出信息并关闭持仓
+
+        参数:
+            stock_code: 股票代码
+            buy_date: 买入日期（用于定位持仓记录）
+            sell_price: 卖出价格
+            sell_date: 卖出日期
+        返回:
+            dict: {success, message, pnl, pnl_pct}
+        """
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        try:
+            # 查找对应持仓
+            cursor.execute(
+                'SELECT buy_price, shares, stock_name FROM manual_positions '
+                'WHERE stock_code=? AND buy_date=? AND status="holding"',
+                (stock_code, buy_date)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return {'success': False, 'message': '未找到对应的持仓记录'}
+
+            buy_price, shares, stock_name = row[0], row[1], row[2]
+
+            # 计算盈亏
+            pnl_per_share = sell_price - buy_price
+            pnl_pct = (pnl_per_share / buy_price) * 100 if buy_price > 0 else 0
+            total_pnl = pnl_per_share * shares if shares > 0 else pnl_per_share
+
+            # 更新记录
+            cursor.execute(
+                'UPDATE manual_positions SET '
+                'status="sold", sell_price=?, sell_date=?, '
+                'actual_pnl=?, actual_pnl_pct=?, updated_at=? '
+                'WHERE stock_code=? AND buy_date=? AND status="holding"',
+                (sell_price, sell_date, round(total_pnl, 2), round(pnl_pct, 2),
+                 now, stock_code, buy_date)
+            )
+            conn.commit()
+
+            pnl_sign = "+" if pnl_pct >= 0 else ""
+            return {
+                'success': True,
+                'message': f'{stock_name}({stock_code}) 卖出 @{sell_price:.2f}，盈亏 {pnl_sign}{pnl_pct:.1f}%',
+                'pnl': round(total_pnl, 2),
+                'pnl_pct': round(pnl_pct, 2),
+            }
+        except Exception as e:
+            return {'success': False, 'message': f'卖出录入失败: {e}'}
+        finally:
+            conn.close()
+
+    def list_closed_positions(self, limit: int = 50) -> pd.DataFrame:
+        """获取已卖出/已关闭的持仓记录"""
+        conn = sqlite3.connect(self.db_path)
+        df = pd.read_sql_query(
+            f'SELECT * FROM manual_positions WHERE status IN ("sold", "closed") '
+            f'ORDER BY updated_at DESC LIMIT {limit}', conn
+        )
+        conn.close()
+        return df
 
     def buy(self, stock_code: str, stock_name: str, price: float, shares: int = None) -> dict:
         """

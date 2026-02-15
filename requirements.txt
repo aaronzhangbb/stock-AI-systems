@@ -25,3 +25,7 @@ xgboost>=3.1.0
 lightgbm>=4.6.0
 shap>=0.50.0
 matplotlib>=3.10.0
+
+# AI策略V2.0 第三层 (Transformer时序引擎)
+# torch需从PyTorch官方安装: pip install torch --index-url https://download.pytorch.org/whl/cu128
+# torch>=2.10.0
