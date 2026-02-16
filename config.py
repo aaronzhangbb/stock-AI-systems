@@ -46,9 +46,21 @@ AI_PREDICT_HORIZON = 5        # 预测未来N天涨跌
 AI_MIN_TRAIN_SAMPLES = 80
 
 # ==================== 风控参数 ====================
-STOP_LOSS_PCT = 0.08          # 止损 8%
-TAKE_PROFIT_PCT = 0.20        # 止盈 20%
-TRAILING_STOP_PCT = 0.10      # 追踪止损 10%
+# 注意: 以下固定百分比仅作为「降级保底」使用
+# AI策略的止盈止损/仓位由 ai_engine_v2._compute_trade_advice() 动态计算:
+#   - 止损: ATR × 动态倍数(1.0~3.5), 结合趋势强度/波动率/支撑位
+#   - 止盈: 多目标体系(T1/T2/T3), ATR驱动 + 阻力位自适应
+#   - 仓位: 改进Kelly公式 × 波动率缩放 × AI置信度 (5%~35%)
+#   - 持有: ATR标准化目标距离 + 动量加速度推算
+STOP_LOSS_PCT = 0.08          # 降级止损 8% (ATR计算失败时使用)
+TAKE_PROFIT_PCT = 0.20        # 降级止盈 20% (ATR计算失败时使用)
+TRAILING_STOP_PCT = 0.10      # 降级追踪止损 10% (ATR计算失败时使用)
+
+# Kelly仓位管理参数
+KELLY_FRACTION = 0.5          # 使用半Kelly (保守系数)
+TARGET_PORTFOLIO_VOL = 0.15   # 目标组合年化波动率 15%
+MAX_SINGLE_POSITION = 0.35    # 单只最大仓位 35%
+MIN_SINGLE_POSITION = 0.05    # 单只最小仓位 5%
 
 # ==================== 推荐参数 ====================
 RECOMMEND_TOP_N = 20          # 每日推荐股票数

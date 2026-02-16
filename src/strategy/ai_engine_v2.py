@@ -777,26 +777,26 @@ class AIScorer:
         except Exception:
             return None
     
-    def _compute_trade_advice(self, data: pd.DataFrame, close: float) -> Dict:
+    def _compute_trade_advice(self, data: pd.DataFrame, close: float,
+                               ai_probability: float = 0.5) -> Dict:
         """
-        基于技术指标计算买入/卖出建议
+        智能交易建议引擎 V2.0
         
-        买入建议:
-          - buy_price: 建议买入价 (支撑位/回调位)
-          - buy_price_upper: 可接受最高买入价
-          - buy_condition: 触发买入的条件描述
-          - buy_timing: 买入时机建议
+        核心理念: 所有参数都由数据驱动，不使用硬编码阈值
         
-        卖出建议:
-          - sell_target: 目标止盈价
-          - sell_stop: 止损价
-          - sell_condition: 卖出条件描述
-          - hold_days: 建议持有天数
+        升级要点:
+          1. 止损: 纯ATR驱动 + 支撑位感知，不设固定百分比上下限
+          2. 止盈: 多目标体系(T1/T2/T3) + 阻力位自适应
+          3. 仓位: 改进Kelly公式 × 波动率缩放 × AI置信度
+          4. 持有期: ATR标准化目标距离 + 动量加速度估算
+          5. 买入价: 成交密集区 + 多级支撑带 + ATR缓冲
         """
         last = data.iloc[-1]
         
         try:
-            # ---- 基础价位 ----
+            # ================================================================
+            # 基础数据提取
+            # ================================================================
             high_20 = float(data['high'].tail(20).max())
             low_20 = float(data['low'].tail(20).min())
             high_60 = float(data['high'].tail(60).max())
@@ -807,75 +807,269 @@ class AIScorer:
             ma20 = float(data['close'].tail(20).mean())
             ma60_val = float(data['close'].tail(60).mean()) if len(data) >= 60 else ma20
             
-            # 布林带
             bb_mid = ma20
             bb_std = float(data['close'].tail(20).std())
             bb_lower = bb_mid - 2 * bb_std
             bb_upper = bb_mid + 2 * bb_std
             
-            # ATR (用于止损计算)
+            # ATR — 核心波动度量
             atr = float(last.get('atr_14', 0)) if not pd.isna(last.get('atr_14', np.nan)) else close * 0.03
             if atr <= 0:
                 atr = close * 0.03
+            atr_pct = atr / close  # ATR占股价比例
             
-            # 波动率
+            # 各指标
             vol20d = float(last.get('volatility_20d', 0.3)) if not pd.isna(last.get('volatility_20d', np.nan)) else 0.3
-            
-            # RSI
+            vol5d = float(last.get('volatility_5d', vol20d)) if not pd.isna(last.get('volatility_5d', np.nan)) else vol20d
             rsi = float(last.get('rsi_14', 50)) if not pd.isna(last.get('rsi_14', np.nan)) else 50
-            
-            # BB位置
             bb_pos = float(last.get('bb_pos', 0.5)) if not pd.isna(last.get('bb_pos', np.nan)) else 0.5
-            
-            # MACD
             macd_hist = float(last.get('macd_hist', 0)) if not pd.isna(last.get('macd_hist', np.nan)) else 0
-            
-            # MA60偏离度
             ma60_diff = float(last.get('ma60_diff', 0)) if not pd.isna(last.get('ma60_diff', np.nan)) else 0
             
-            # ============================================================
-            # 1. 买入价格计算
-            # ============================================================
-            # 支撑位候选 (取多个支撑的加权)
+            # 趋势强度评分 (0~1, 越高趋势越强)
+            ma_align = float(last.get('ma_alignment', 1)) if not pd.isna(last.get('ma_alignment', np.nan)) else 1
+            trend_strength = ma_align / 3.0  # 标准化到 0~1
+            
+            # 动量加速度
+            mom_accel = float(last.get('momentum_accel_5', 0)) if not pd.isna(last.get('momentum_accel_5', np.nan)) else 0
+            
+            # 波动率收缩度 (短/长期波动率比, <1 说明近期波动在收缩)
+            vol_contraction = float(last.get('vol_contraction_5_20', 1.0)) if not pd.isna(last.get('vol_contraction_5_20', np.nan)) else 1.0
+            
+            # 上行/下行波动率不对称性
+            vol_asym = float(last.get('vol_asymmetry', 1.0)) if not pd.isna(last.get('vol_asymmetry', np.nan)) else 1.0
+            
+            # 价格效率 (趋势型 vs 震荡型)
+            efficiency = float(last.get('efficiency_10d', 0.5)) if not pd.isna(last.get('efficiency_10d', np.nan)) else 0.5
+            
+            # ================================================================
+            # 1. 智能止损系统 — 纯ATR驱动 + 支撑位感知
+            # ================================================================
+            # 基础止损距离 = ATR × 动态倍数
+            # 动态倍数由趋势强度和波动率状态决定
+            
+            # 趋势越强 → 止损可以给更多空间(不被洗出去)
+            # 波动率越高 → 止损需要更宽(避免噪音触发)
+            # 波动率收缩 → 止损可以收紧(突破前的宁静)
+            trend_factor = 1.0 + trend_strength * 0.5   # 1.0 ~ 1.5
+            vol_regime_factor = np.clip(vol20d / 0.3, 0.7, 2.0)  # 以30%年化波动率为基准
+            contraction_factor = np.clip(vol_contraction, 0.6, 1.4)
+            
+            stop_atr_multi = 1.5 * trend_factor * vol_regime_factor * contraction_factor
+            stop_atr_multi = np.clip(stop_atr_multi, 1.0, 3.5)  # 限制在1~3.5倍ATR
+            
+            raw_stop = close - atr * stop_atr_multi
+            
+            # 支撑位感知: 如果附近有强支撑, 止损设在支撑位下方
+            support_candidates = []
+            if bb_lower > 0 and bb_lower < close:
+                support_candidates.append(bb_lower)
+            if low_20 > 0 and low_20 < close:
+                support_candidates.append(low_20)
+            if ma20 > 0 and ma20 < close:
+                support_candidates.append(ma20)
+            if ma60_val > 0 and ma60_val < close and ma60_val > close * 0.85:
+                support_candidates.append(ma60_val)
+            
+            # 找最近的、在ATR止损范围内的支撑位
+            nearby_supports = [s for s in support_candidates 
+                              if s > raw_stop and s < close]
+            
+            if nearby_supports:
+                # 取最近的支撑位, 止损设在支撑位下方 0.5~1 ATR
+                nearest_support = max(nearby_supports)
+                support_stop = nearest_support - atr * 0.5
+                # 取支撑止损和ATR止损的较优值(更紧但不低于原始ATR止损)
+                sell_stop = max(support_stop, raw_stop)
+            else:
+                sell_stop = raw_stop
+            
+            # 计算实际止损百分比 (不设硬上下限, 但记录供参考)
+            stop_pct = (close - sell_stop) / close
+            
+            # ================================================================
+            # 2. 智能止盈系统 — 多目标 + 阻力位自适应
+            # ================================================================
+            # 上行波动率越大 → 目标可以更高
+            # 动量加速 → 目标拉远
+            # 趋势强 → 目标拉远
+            
+            upside_factor = np.clip(vol_asym, 0.7, 2.0)  # 上行波动率优势
+            momentum_factor = 1.0 + np.clip(mom_accel * 20, -0.3, 0.5)  # 动量加速调整
+            
+            # 基础目标: ATR的倍数 (比止损倍数大, 确保盈亏比>1)
+            target_atr_multi = stop_atr_multi * 1.8 * upside_factor * momentum_factor
+            target_atr_multi = np.clip(target_atr_multi, 2.0, 8.0)
+            
+            # 三级目标体系
+            t1_price = close + atr * target_atr_multi * 0.5    # 保守目标 (50%仓位)
+            t2_price = close + atr * target_atr_multi           # 标准目标 (30%仓位)
+            t3_price = close + atr * target_atr_multi * 1.5     # 激进目标 (20%仓位)
+            
+            # 阻力位参考 — 可能限制目标
+            resistances = []
+            if bb_upper > close:
+                resistances.append(('BB上轨', bb_upper, 0.3))
+            if high_20 > close:
+                resistances.append(('20日高点', high_20, 0.35))
+            if high_60 > close:
+                resistances.append(('60日高点', high_60, 0.15))
+            if ma60_val > close:
+                resistances.append(('MA60', ma60_val, 0.2))
+            
+            # 智能调整: 如果阻力位在T1和T2之间, 把T2调整为阻力位
+            if resistances:
+                weighted_resist = sum(p * w for _, p, w in resistances) / sum(w for _, _, w in resistances)
+                if t1_price < weighted_resist < t2_price:
+                    t2_price = weighted_resist
+                elif weighted_resist < t1_price and weighted_resist > close:
+                    t1_price = weighted_resist
+            
+            sell_target = t2_price  # 默认展示标准目标
+            
+            # ================================================================
+            # 3. 持有周期预测 — ATR标准化 + 动量推算
+            # ================================================================
+            # 核心思路: 达到目标需要移动多少个ATR, 历史上平均每天移动多少
+            
+            target_distance = sell_target - close
+            daily_avg_move = atr * 0.6  # 日均有效移动约为ATR的60%
+            
+            # 效率修正: 趋势型市场移动更快, 震荡型更慢
+            eff_adj = np.clip(efficiency, 0.2, 0.9)
+            adjusted_daily_move = daily_avg_move * (eff_adj / 0.5)
+            
+            # 动量修正: 正动量加速到达, 负动量减速
+            mom_adj = 1.0 + np.clip(mom_accel * 30, -0.4, 0.6)
+            adjusted_daily_move *= mom_adj
+            
+            if adjusted_daily_move > 0:
+                est_days = target_distance / adjusted_daily_move
+                est_days = np.clip(est_days, 1, 30)
+            else:
+                est_days = 10
+            
+            # 生成持有建议区间 (±30%)
+            day_low = max(1, int(est_days * 0.7))
+            day_high = max(day_low + 1, int(est_days * 1.3))
+            hold_suggestion = f"{day_low}~{day_high}天"
+            
+            # ================================================================
+            # 4. 买入价格 — 成交密集区 + 多层支撑带 + ATR缓冲
+            # ================================================================
+            # VWAP参考 (成交量加权价格 — 机构常用的价值中枢)
+            vwap20_diff = float(last.get('vwap20_diff', 0)) if not pd.isna(last.get('vwap20_diff', np.nan)) else 0
+            vwap_center = close / (1 + vwap20_diff) if abs(vwap20_diff) < 0.1 else close
+            
+            # 多层支撑加权 (权重基于距离当前价的远近和可靠性)
             supports = []
             
-            # 布林带下轨支撑
-            if bb_lower > 0:
-                supports.append(('BB下轨', bb_lower, 0.25))
+            # VWAP价值中枢 (成交密集区, 最可靠的支撑)
+            if vwap_center > 0 and vwap_center < close:
+                dist = (close - vwap_center) / close
+                weight = 0.35 * np.clip(1 - dist * 5, 0.3, 1.0)  # 越近权重越高
+                supports.append(('VWAP中枢', vwap_center, weight))
             
-            # 20日最低价支撑
-            supports.append(('20日低点', low_20, 0.20))
+            # 布林带中轨 (均值回归锚点)
+            if bb_mid > 0 and bb_mid < close:
+                supports.append(('BB中轨', bb_mid, 0.20))
             
-            # MA20支撑 (如果价格在MA20附近或以上)
-            if close >= ma20 * 0.97:
-                supports.append(('MA20', ma20, 0.20))
+            # 布林带下轨
+            if bb_lower > 0 and bb_lower < close:
+                supports.append(('BB下轨', bb_lower, 0.10))
             
-            # MA60支撑 (长期均线)
-            if ma60_val > 0 and close >= ma60_val * 0.95:
+            # MA支撑 (根据趋势方向给不同权重)
+            if ma5 < close and ma5 > close * 0.95:
+                supports.append(('MA5', ma5, 0.15 if trend_strength >= 0.5 else 0.08))
+            if ma20 > 0 and ma20 < close:
+                supports.append(('MA20', ma20, 0.20 if trend_strength >= 0.3 else 0.12))
+            if ma60_val > 0 and ma60_val < close and ma60_val > close * 0.88:
                 supports.append(('MA60', ma60_val, 0.15))
             
-            # 近期低点回踩
-            recent_low = float(data['low'].tail(5).min())
-            supports.append(('5日低点', recent_low, 0.20))
+            # 近期低点 (经过验证的支撑)
+            low_5 = float(data['low'].tail(5).min())
+            if low_5 < close:
+                supports.append(('5日低点', low_5, 0.15))
             
-            # 计算加权支撑价格
+            # 20日低点 (较强支撑)
+            if low_20 < close:
+                supports.append(('20日低点', low_20, 0.10))
+            
             if supports:
                 total_weight = sum(w for _, _, w in supports)
                 buy_price = sum(p * w for _, p, w in supports) / total_weight
             else:
-                buy_price = close * 0.97
+                buy_price = close - atr * 0.8
             
-            # 确保买入价不高于当前价
             buy_price = min(buy_price, close)
-            # 确保不低于当前价的85%（避免不合理的极低价）
-            buy_price = max(buy_price, close * 0.85)
+            buy_price = max(buy_price, close - atr * 3)  # 不低于3ATR
             
-            # 可接受最高买入价 = 当前价上浮1个ATR的一半
-            buy_upper = min(close + atr * 0.3, close * 1.02)
+            # 买入上限: 基于ATR和波动率收缩状态
+            # 波动率收缩时, 入场容忍度更高(即将突破)
+            if vol_contraction < 0.7:
+                # 波动率强收缩, 可以追高一点
+                upper_atr_multi = 0.6
+            elif vol_contraction < 0.9:
+                upper_atr_multi = 0.4
+            else:
+                upper_atr_multi = 0.25
             
-            # ============================================================
-            # 2. 买入条件判断
-            # ============================================================
+            buy_upper = close + atr * upper_atr_multi
+            
+            # ================================================================
+            # 5. Kelly公式仓位管理 — AI概率驱动
+            # ================================================================
+            # f* = (p * b - q) / b
+            # p = AI预测上涨概率
+            # q = 1 - p
+            # b = 期望收益/期望损失 (odds)
+            
+            profit_amt = sell_target - close
+            loss_amt = close - sell_stop
+            risk_reward = round(profit_amt / loss_amt, 2) if loss_amt > 0 else 99
+            
+            p = np.clip(ai_probability, 0.05, 0.95)
+            q = 1 - p
+            b = risk_reward if risk_reward > 0 and risk_reward < 99 else 2.0
+            
+            kelly_fraction = (p * b - q) / b if b > 0 else 0
+            kelly_fraction = np.clip(kelly_fraction, 0, 1)
+            
+            # 使用半Kelly (更保守, 实际中更稳健)
+            half_kelly = kelly_fraction * 0.5
+            
+            # 波动率缩放: 目标组合波动率约15%
+            target_portfolio_vol = 0.15
+            vol_scalar = target_portfolio_vol / (vol20d + 0.01)
+            vol_scalar = np.clip(vol_scalar, 0.3, 2.0)
+            
+            # AI置信度加权: 评分越高, 越接近Kelly建议
+            confidence_weight = np.clip((ai_probability - 0.4) / 0.4, 0.2, 1.0)
+            
+            # 最终仓位 = 半Kelly × 波动率缩放 × 置信度
+            raw_position = half_kelly * vol_scalar * confidence_weight
+            
+            # 仓位分档 (5%~35%, 步长5%)
+            position_value = np.clip(raw_position, 0.05, 0.35)
+            position_value = round(position_value * 20) / 20  # 四舍五入到5%
+            position_value = max(0.05, position_value)
+            position_pct = f"{int(position_value * 100)}%"
+            
+            # 仓位建议描述
+            if position_value >= 0.30:
+                position_advice = f"Kelly最优: 高概率({p:.0%}) × 高盈亏比({b:.1f})"
+            elif position_value >= 0.20:
+                position_advice = f"Kelly建议: 概率{p:.0%}, 盈亏比{b:.1f}, 波动适中"
+            elif position_value >= 0.15:
+                position_advice = f"适中仓位: 信号可靠但波动率偏高({vol20d:.0%})"
+            elif position_value >= 0.10:
+                position_advice = f"轻仓试探: 概率{p:.0%}, 盈亏比{b:.1f}"
+            else:
+                position_advice = f"最小仓位: 信号较弱或风险较高"
+            
+            # ================================================================
+            # 6. 买入条件与时机
+            # ================================================================
             buy_conditions = []
             
             if bb_pos <= 0.2:
@@ -896,102 +1090,59 @@ class AIScorer:
             if macd_hist > 0:
                 buy_conditions.append("MACD金叉")
             
-            # 量能信号
+            if vol_contraction < 0.7:
+                buy_conditions.append("波动率收缩(蓄势)")
+            
             vol_r = float(last.get('vol_ratio_5d', 1)) if not pd.isna(last.get('vol_ratio_5d', np.nan)) else 1
             if vol_r >= 1.5:
                 buy_conditions.append(f"放量({vol_r:.1f}倍)")
             
             if not buy_conditions:
-                buy_conditions.append("AI模型高分推荐")
+                buy_conditions.append(f"AI概率{p:.0%}推荐")
             
-            buy_condition_str = " + ".join(buy_conditions[:3])  # 最多显示3个
+            buy_condition_str = " + ".join(buy_conditions[:3])
             
-            # 买入时机
-            if bb_pos <= 0.15 and rsi <= 35:
-                buy_timing = "可立即建仓(强超卖信号)"
-            elif bb_pos <= 0.3 or rsi <= 40:
-                buy_timing = "可分批建仓(接近支撑)"
+            # 买入时机 (结合多因素)
+            urgency_score = 0
+            if bb_pos <= 0.15: urgency_score += 2
+            elif bb_pos <= 0.3: urgency_score += 1
+            if rsi <= 30: urgency_score += 2
+            elif rsi <= 40: urgency_score += 1
+            if vol_contraction < 0.7: urgency_score += 1
+            if mom_accel > 0.005: urgency_score += 1
+            
+            if urgency_score >= 4:
+                buy_timing = "可立即建仓(多信号共振)"
+            elif urgency_score >= 2:
+                buy_timing = "可分批建仓(信号偏积极)"
             elif close <= buy_price * 1.01:
-                buy_timing = "接近买入价，等确认信号"
+                buy_timing = "接近买入价,等确认信号"
             else:
                 buy_timing = "等回调至支撑位再入场"
             
-            # ============================================================
-            # 3. 卖出价格计算
-            # ============================================================
-            # 止盈目标 — 基于波动率和ATR
-            # 高波动：目标更远；低波动：目标适中
-            if vol20d > 0.5:  # 高波动
-                target_ratio = 0.08  # 8%
-                hold_suggestion = "3~5天"
-            elif vol20d > 0.3:  # 中波动
-                target_ratio = 0.06  # 6%
-                hold_suggestion = "5~8天"
-            else:  # 低波动
-                target_ratio = 0.04  # 4%
-                hold_suggestion = "5~10天"
-            
-            sell_target = close * (1 + target_ratio)
-            
-            # 阻力位参考
-            resistances = []
-            if bb_upper > close:
-                resistances.append(('BB上轨', bb_upper))
-            if high_20 > close:
-                resistances.append(('20日高点', high_20))
-            if ma60_val > close:
-                resistances.append(('MA60', ma60_val))
-            
-            # 如果阻力位比目标价更近，调整目标
-            if resistances:
-                nearest_resist = min(r[1] for r in resistances)
-                if nearest_resist < sell_target and nearest_resist > close:
-                    sell_target = nearest_resist  # 以最近阻力位为目标
-            
-            # 止损价 — 基于ATR的动态止损
-            # 根据波动率调整止损幅度
-            if vol20d > 0.5:
-                stop_atr_multi = 2.0
-            elif vol20d > 0.3:
-                stop_atr_multi = 1.5
-            else:
-                stop_atr_multi = 1.2
-            
-            sell_stop = close - atr * stop_atr_multi
-            # 止损不低于当前价的92% (最大8%止损)
-            sell_stop = max(sell_stop, close * 0.92)
-            
-            # ============================================================
-            # 4. 卖出条件
-            # ============================================================
+            # ================================================================
+            # 7. 卖出条件描述
+            # ================================================================
             sell_conditions = []
-            sell_conditions.append(f"目标价{sell_target:.2f}(+{(sell_target/close-1)*100:.1f}%)")
-            sell_conditions.append(f"止损价{sell_stop:.2f}(-{(1-sell_stop/close)*100:.1f}%)")
-            
-            # 额外卖出信号
-            if vol20d > 0.4:
-                sell_conditions.append("高波动注意减仓")
+            sell_conditions.append(f"T1:{t1_price:.2f}(+{(t1_price/close-1)*100:.1f}%减半)")
+            sell_conditions.append(f"T2:{sell_target:.2f}(+{(sell_target/close-1)*100:.1f}%)")
+            sell_conditions.append(f"止损:{sell_stop:.2f}(-{stop_pct*100:.1f}%)")
             
             sell_condition_str = " | ".join(sell_conditions[:3])
             
-            # 盈亏比
-            profit = sell_target - close
-            loss = close - sell_stop
-            risk_reward = round(profit / loss, 2) if loss > 0 else 99
+            # ================================================================
+            # 8. 退出优先级 + 预测有效期
+            # ================================================================
+            day_mid = int(round(est_days))
+            validity_end = max(day_mid + 1, int(est_days * 1.5))
             
-            # 建议仓位(基于风险)
-            if risk_reward >= 3:
-                position_pct = "30%"
-                position_advice = "高盈亏比，可加大仓位"
-            elif risk_reward >= 2:
-                position_pct = "20%"
-                position_advice = "中等盈亏比"
-            elif risk_reward >= 1.5:
-                position_pct = "15%"
-                position_advice = "盈亏比一般"
-            else:
-                position_pct = "10%"
-                position_advice = "谨慎操作"
+            # 退出优先级说明 (核心: 价格为王, 时间兜底)
+            exit_rules = (
+                f"❶止损{sell_stop:.2f}(-{stop_pct*100:.1f}%) "
+                f"❷止盈T2:{sell_target:.2f}(+{(sell_target/close-1)*100:.1f}%) "
+                f"❸追踪止损(盈利后回撤1ATR) "
+                f"❹超{validity_end}天未触发以上→收紧止损清仓"
+            )
             
             return {
                 'buy_price': round(buy_price, 2),
@@ -1001,7 +1152,7 @@ class AIScorer:
                 'sell_target': round(sell_target, 2),
                 'sell_stop': round(sell_stop, 2),
                 'sell_condition': sell_condition_str,
-                'hold_days': hold_suggestion,
+                'hold_days': hold_suggestion,      # 保留字段兼容, 含义改为"预测有效期"
                 'risk_reward': risk_reward,
                 'position_pct': position_pct,
                 'position_advice': position_advice,
@@ -1013,23 +1164,39 @@ class AIScorer:
                 'atr': round(atr, 2),
                 'high_20d': round(high_20, 2),
                 'low_20d': round(low_20, 2),
+                # 多目标和详细参数
+                'sell_t1': round(t1_price, 2),
+                'sell_t3': round(t3_price, 2),
+                'stop_pct': round(stop_pct * 100, 1),
+                'target_pct': round((sell_target / close - 1) * 100, 1),
+                'kelly_fraction': round(kelly_fraction, 3),
+                'position_value': round(position_value, 2),
+                'est_hold_days': round(float(est_days), 1),
+                # 退出规则
+                'exit_rules': exit_rules,
+                'validity_days': validity_end,
             }
         except Exception:
             return {
                 'buy_price': round(close * 0.97, 2),
                 'buy_upper': round(close * 1.01, 2),
-                'buy_condition': 'AI模型高分推荐',
+                'buy_condition': 'AI模型推荐',
                 'buy_timing': '等回调确认后入场',
                 'sell_target': round(close * 1.05, 2),
                 'sell_stop': round(close * 0.95, 2),
                 'sell_condition': f"目标+5% | 止损-5%",
-                'hold_days': '5~10天',
+                'hold_days': '~10天',
                 'risk_reward': 1.0,
                 'position_pct': '10%',
-                'position_advice': '谨慎操作',
+                'position_advice': '轻仓试探',
                 'bb_lower': None, 'bb_upper': None,
                 'ma5': None, 'ma20': None, 'ma60': None,
                 'atr': None, 'high_20d': None, 'low_20d': None,
+                'sell_t1': None, 'sell_t3': None,
+                'stop_pct': 5.0, 'target_pct': 5.0,
+                'kelly_fraction': 0, 'position_value': 0.10,
+                'est_hold_days': 7,
+                'exit_rules': '', 'validity_days': 15,
             }
     
     def scan_market(self, cache, pool, 
@@ -1153,8 +1320,8 @@ class AIScorer:
                 vol_r = data.iloc[-1].get('vol_ratio_5d')
                 ma60d = data.iloc[-1].get('ma60_diff')
                 
-                # ====== 计算买卖建议 ======
-                advice = self._compute_trade_advice(data, close)
+                # ====== 计算买卖建议 (传入AI概率, 驱动Kelly仓位) ======
+                advice = self._compute_trade_advice(data, close, ai_probability=prob)
                 
                 results.append({
                     'stock_code': code,

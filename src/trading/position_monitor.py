@@ -1,15 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-持仓监控引擎
+持仓监控引擎 V2.0
 - 每日检查所有持仓股
 - 检测止损 / 止盈 / 追踪止损 / 策略卖出信号
+- ★ 时间衰减退出机制: 止损随持有时间自动收紧
 - 生成卖出建议
 - 支持邮件推送
 - 支持盘中实时价格监控
+
+时间衰减退出模型 (4阶段):
+    Phase 1 (0~60% 预估持有期):  正常持有, 标准ATR止损
+    Phase 2 (60~100%):          警戒期, 止损开始收紧
+    Phase 3 (100~150%):         超期宽限, 盈利保本/亏损强卖
+    Phase 4 (>150%):            强制退出, 不论盈亏
 """
 
 import os
 import sys
+import numpy as np
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -51,6 +59,9 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
             sell_signals: list  # 策略卖出信号
         }
     """
+    default_stop = round(buy_price * (1 - config.STOP_LOSS_PCT), 2)
+    default_target = round(buy_price * (1 + config.TAKE_PROFIT_PCT), 2)
+    
     result = {
         'stock_code': stock_code,
         'stock_name': stock_name,
@@ -59,14 +70,22 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
         'shares': shares,
         'current_price': 0,
         'pnl_pct': 0,
-        'stop_price': round(buy_price * (1 - config.STOP_LOSS_PCT), 2),
-        'target_price': round(buy_price * (1 + config.TAKE_PROFIT_PCT), 2),
+        'stop_price': default_stop,
+        'target_price': default_target,
         'trailing_stop_price': 0,
         'high_since_buy': 0,
         'alerts': [],
         'advice': '持有',
         'sell_signals': [],
-        'price_source': 'close',  # 'close' 或 'realtime'
+        'price_source': 'close',
+        'stop_method': 'fixed',
+        # 时间衰减相关字段
+        'days_held': 0,
+        'est_hold_days': 10,
+        'time_ratio': 0,
+        'time_phase': 1,
+        'time_phase_name': '正常持有',
+        'original_stop': default_stop,
     }
 
     try:
@@ -75,7 +94,6 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
             result['alerts'].append('无法获取行情数据')
             return result
 
-        # 优先使用外部传入的实时价格，其次尝试实时接口，最后用收盘价
         current_price = float(df['close'].iloc[-1])
         if realtime_price is not None and realtime_price > 0:
             current_price = float(realtime_price)
@@ -87,49 +105,225 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
                     current_price = float(rt['close'])
                     result['price_source'] = 'realtime'
             except Exception:
-                pass  # 实时价格获取失败时降级使用收盘价
+                pass
 
         result['current_price'] = current_price
 
-        # 计算盈亏
         pnl_pct = (current_price - buy_price) / buy_price * 100
         result['pnl_pct'] = round(pnl_pct, 2)
 
-        # 买入以来最高价（用于追踪止损）
-        buy_date_str = buy_date[:10]  # 取日期部分
+        # 买入以来的交易日数
+        buy_date_str = buy_date[:10]
         mask = df['date'].astype(str) >= buy_date_str
         df_since = df[mask]
         if df_since.empty:
-            df_since = df.tail(30)  # 回退到最近30天
+            df_since = df.tail(30)
+        
+        days_held = len(df_since)
+        result['days_held'] = days_held
 
         high_since = float(df_since['high'].max())
         result['high_since_buy'] = high_since
 
-        # 追踪止损价 = 最高价 × (1 - 追踪止损比例)
-        trailing_stop = round(high_since * (1 - config.TRAILING_STOP_PCT), 2)
+        # ================================================================
+        # ATR计算 + 动态止损/止盈
+        # ================================================================
+        atr_14 = buy_price * 0.03  # 默认值
+        vol20 = 0.3
+        stop_multi = 1.5
+        
+        try:
+            close_s = df['close'].astype(float)
+            high_s = df['high'].astype(float)
+            low_s = df['low'].astype(float)
+            
+            tr = np.maximum(
+                high_s - low_s,
+                np.maximum(
+                    (high_s - close_s.shift(1)).abs(),
+                    (low_s - close_s.shift(1)).abs()
+                )
+            )
+            _atr = float(tr.rolling(14).mean().iloc[-1])
+            if _atr > 0 and not np.isnan(_atr):
+                atr_14 = _atr
+            
+            ret = close_s.pct_change()
+            _vol = float(ret.rolling(20).std().iloc[-1]) * np.sqrt(252)
+            if not np.isnan(_vol) and _vol > 0:
+                vol20 = _vol
+            
+            # 趋势强度
+            ma5_v = float(close_s.tail(5).mean())
+            ma10_v = float(close_s.tail(10).mean())
+            ma20_v = float(close_s.tail(20).mean())
+            ma_align = int(ma5_v > ma10_v) + int(ma10_v > ma20_v)
+            trend_str = ma_align / 2.0
+            
+            vol_factor = np.clip(vol20 / 0.3, 0.7, 2.0)
+            trend_factor = 1.0 + trend_str * 0.5
+            stop_multi = 1.5 * trend_factor * vol_factor
+            stop_multi = np.clip(stop_multi, 1.0, 3.5)
+            
+            # 价格效率 (趋势型 vs 震荡型)
+            net_move = (close_s - close_s.shift(10)).abs()
+            gross_move = close_s.diff().abs().rolling(10).sum()
+            _eff = float((net_move / (gross_move + 1e-10)).iloc[-1])
+            efficiency = np.clip(_eff if not np.isnan(_eff) else 0.5, 0.1, 0.9)
+            
+            result['stop_method'] = 'atr_dynamic'
+        except Exception:
+            efficiency = 0.5
+
+        # ================================================================
+        # 预估持有天数 (与 ai_engine_v2 保持一致的逻辑)
+        # ================================================================
+        target_multi = stop_multi * 1.8
+        target_distance = atr_14 * target_multi
+        daily_avg_move = atr_14 * 0.6 * (efficiency / 0.5)
+        
+        if daily_avg_move > 0:
+            est_hold_days = np.clip(target_distance / daily_avg_move, 2, 30)
+        else:
+            est_hold_days = 10
+        
+        result['est_hold_days'] = round(float(est_hold_days), 1)
+        
+        # ================================================================
+        # 基础ATR止损/止盈 (时间衰减前的初始值)
+        # ================================================================
+        base_stop = round(buy_price - atr_14 * stop_multi, 2)
+        base_stop = max(base_stop, buy_price * 0.80)
+        
+        base_target = round(buy_price + atr_14 * target_multi, 2)
+        
+        result['original_stop'] = base_stop
+        result['stop_price'] = base_stop
+        result['target_price'] = base_target
+        
+        # ================================================================
+        # ★ 预测有效期 — 止损随时间渐进收紧 (价格为王, 时间兜底)
+        #
+        # 核心原则: 永远不因为"时间到了"直接卖出
+        #           而是通过收紧止损, 让价格自己触发退出
+        # ================================================================
+        validity_days = max(est_hold_days + 1, est_hold_days * 1.5)
+        time_ratio = days_held / est_hold_days if est_hold_days > 0 else 0
+        result['time_ratio'] = round(time_ratio, 2)
+        
+        is_profitable = current_price > buy_price
+        
+        # 正常追踪止损 (始终生效)
+        trailing_atr_multi = max(stop_multi * 0.8, 1.0)
+        trailing_stop = round(high_since - atr_14 * trailing_atr_multi, 2)
+        
+        if time_ratio <= 0.7:
+            # ---- 预测有效期内 (0~70%): 标准持有 ----
+            time_phase = 1
+            phase_name = '价格主导'
+            effective_stop = base_stop
+            
+        elif time_ratio <= 1.0:
+            # ---- 接近有效期 (70~100%): 轻微收紧止损 ----
+            time_phase = 2
+            phase_name = '渐进收紧'
+            
+            tighten_progress = (time_ratio - 0.7) / 0.3  # 0→1
+            
+            if is_profitable:
+                # 盈利: 止损向买入价方向上移 (锁定部分利润)
+                profit_lock = buy_price + (current_price - buy_price) * 0.2
+                effective_stop = base_stop + (profit_lock - base_stop) * tighten_progress
+            else:
+                # 亏损: 止损只轻微收紧 (让价格自己说话)
+                tighten_target = base_stop + (current_price - base_stop) * 0.15
+                effective_stop = base_stop + (tighten_target - base_stop) * tighten_progress
+            
+            trailing_atr_multi = max(trailing_atr_multi * (1 - tighten_progress * 0.2), 0.8)
+            trailing_stop = round(high_since - atr_14 * trailing_atr_multi, 2)
+            
+        elif time_ratio <= 1.5:
+            # ---- 超过有效期 (100~150%): 止损进一步收紧, 但仍由价格决定 ----
+            time_phase = 3
+            phase_name = '止损收紧'
+            
+            exceed_progress = (time_ratio - 1.0) / 0.5  # 0→1
+            
+            if is_profitable:
+                # 盈利: 止损上移到至少买入价(保本), 然后继续收紧
+                breakeven = buy_price
+                tight_stop = current_price - atr_14 * 1.2  # 留1.2ATR空间
+                effective_stop = breakeven + (tight_stop - breakeven) * exceed_progress
+                effective_stop = max(effective_stop, buy_price)
+            else:
+                # 亏损: 止损收紧到只留1ATR空间 (让价格做最后裁判)
+                tight_stop = current_price - atr_14 * 1.0
+                effective_stop = base_stop + (tight_stop - base_stop) * exceed_progress
+                effective_stop = max(effective_stop, base_stop)
+            
+            trailing_atr_multi = 0.8
+            trailing_stop = round(high_since - atr_14 * trailing_atr_multi, 2)
+            
+        else:
+            # ---- 远超有效期 (>150%): 最紧止损, 但仍由价格触发 ----
+            time_phase = 4
+            phase_name = '极紧止损'
+            
+            # 只留 0.5ATR 空间, 任何微小下跌都会触发止损退出
+            effective_stop = current_price - atr_14 * 0.5
+            effective_stop = max(effective_stop, base_stop)
+            
+            trailing_atr_multi = 0.5
+            trailing_stop = round(high_since - atr_14 * trailing_atr_multi, 2)
+        
+        # 止损只会收紧(上移), 不会放松(下移)
+        time_decay_stop = round(max(effective_stop, base_stop), 2)
+        result['stop_price'] = time_decay_stop
         result['trailing_stop_price'] = trailing_stop
+        result['time_phase'] = time_phase
+        result['time_phase_name'] = phase_name
 
-        # ---- 检查卖出条件 ----
-        urgency = 0  # 0=持有, 1=建议卖出, 2=立即卖出
+        # ================================================================
+        # 检查卖出条件 — 优先级: ❶止损 ❷止盈 ❸追踪止损 ❹策略信号
+        # 注意: 没有"时间到了直接卖"的逻辑, 全部由价格触发
+        # ================================================================
+        urgency = 0
 
-        # 1) 止损
+        # ❶ 止损 (最高优先级, 含时间收紧后的止损)
         if current_price <= result['stop_price']:
-            result['alerts'].append(f"触发止损（止损价 {result['stop_price']:.2f}）")
+            if time_phase >= 3:
+                stop_desc = f"ATR止损(已收紧, 持有{days_held}天)"
+            elif time_phase == 2:
+                stop_desc = f"ATR止损(渐进收紧中)"
+            else:
+                stop_desc = "ATR动态止损" if result['stop_method'] == 'atr_dynamic' else "固定止损"
+            result['alerts'].append(f"❶触发{stop_desc}（止损价 {result['stop_price']:.2f}）")
             urgency = max(urgency, 2)
 
-        # 2) 止盈
+        # ❷ 止盈
         if current_price >= result['target_price']:
-            result['alerts'].append(f"触发止盈（目标价 {result['target_price']:.2f}）")
+            result['alerts'].append(f"❷触发止盈（目标价 {result['target_price']:.2f}）")
             urgency = max(urgency, 1)
 
-        # 3) 追踪止损（只在盈利状态下生效）
-        if pnl_pct > 5 and current_price <= trailing_stop:
+        # ❸ 追踪止损
+        if pnl_pct > 2 and current_price <= result['trailing_stop_price']:
             result['alerts'].append(
-                f"触发追踪止损（最高 {high_since:.2f} → 回落至 {current_price:.2f}）"
+                f"❸触发追踪止损（最高 {high_since:.2f} → 回落至 {current_price:.2f}）"
             )
             urgency = max(urgency, 2)
+        
+        # 时间状态提示 (纯信息, 不直接触发卖出)
+        if time_phase == 2 and urgency == 0:
+            result['alerts'].append(
+                f"📋 预测有效期已过{time_ratio:.0%}, 止损渐进收紧至{result['stop_price']:.2f}"
+            )
+        elif time_phase >= 3 and urgency == 0:
+            result['alerts'].append(
+                f"📋 已超预测有效期(持有{days_held}天/{est_hold_days:.0f}天), "
+                f"止损收紧至{result['stop_price']:.2f}, 等待价格触发退出"
+            )
 
-        # 4) 策略卖出信号
+        # ❹ 策略卖出信号
         try:
             sigs = run_all_strategies(df)
             sell_sigs = [s for s in sigs if s['signal'] == 'sell']

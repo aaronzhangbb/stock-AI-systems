@@ -819,11 +819,21 @@ if page == "📡 每日信号":
                         level = "关注"
                         level_color = "#5eba7d"
                     
-                    # 到期策略
-                    expire_action = "按收盘价卖出（不论盈亏）"
-                    if pd.notna(p_sell_tgt) and pd.notna(p_sell_stp) and p_close > 0:
-                        mid_price = (p_sell_tgt + p_close) / 2
-                        expire_action = f"若盈利：移动止盈到成本价以上，继续持有1~2天观察；若亏损：按收盘价无条件卖出止损"
+                    # 退出规则 — 价格为王, 时间兜底
+                    exit_rules = row_pick.get('exit_rules', '')
+                    validity_d = row_pick.get('validity_days')
+                    est_d = row_pick.get('est_hold_days')
+                    
+                    if exit_rules:
+                        expire_action = (
+                            f"<b>退出优先级</b> (价格为王, 时间兜底):<br>"
+                            f"&nbsp;❶ <b style='color:#e06060;'>止损</b>: 跌破止损价 → 无条件卖出 (最高优先级)<br>"
+                            f"&nbsp;❷ <b style='color:#5eba7d;'>止盈</b>: 触及目标价 → 卖出锁利<br>"
+                            f"&nbsp;❸ <b style='color:#f0a050;'>追踪止损</b>: 从高点回撤超1ATR → 保护利润<br>"
+                            f"&nbsp;❹ <b style='color:#94a3b8;'>超有效期</b>: 超{validity_d}天以上都没触发 → 止损自动收紧至0.5ATR, 让价格做最终裁判"
+                        )
+                    else:
+                        expire_action = f"❶止损 ❷止盈 ❸追踪止损 ❹超有效期止损收紧"
 
                     # 基本面标签(含行业相对估值)
                     _fv = _fund_map.get(p_code, {})
@@ -893,9 +903,9 @@ if page == "📡 每日信号":
 <div style="color:#94a3b8;font-size:11px;">{stp_pct_s}</div>
 </div>
 <div style="text-align:center;background:rgba(255,255,255,0.04);border-radius:8px;padding:10px;">
-<div style="color:#7a869a;font-size:11px;">持有/仓位</div>
-<div style="color:#e2e8f0;font-size:16px;font-weight:700;">{p_hold}</div>
-<div style="color:#7a869a;font-size:11px;">仓位 {p_pos}</div>
+<div style="color:#7a869a;font-size:11px;">仓位/有效期</div>
+<div style="color:#e2e8f0;font-size:16px;font-weight:700;">{p_pos}</div>
+<div style="color:#7a869a;font-size:11px;">有效期 {p_hold}</div>
 </div>
 </div>
 
@@ -910,13 +920,12 @@ if page == "📡 每日信号":
 <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:14px 18px;margin-top:4px;margin-bottom:16px;">
 <div style="color:#e2e8f0;font-weight:700;font-size:14px;margin-bottom:8px;">📖 操作规则（必读）</div>
 <div style="color:#94a3b8;font-size:13px;line-height:1.8;">
-<b style="color:#5eba7d;">买入:</b> 在"买入价"附近挂限价单，不要追高超过"最高可接受价"<br>
-<b style="color:#e06060;">止盈:</b> 股价触及"止盈卖出"价格时，立即卖出锁定利润<br>
-<b style="color:#94a3b8;">止损:</b> 股价跌破"止损卖出"价格时，无条件卖出，不要心存幻想<br>
-<b style="color:#f0a050;">到期:</b> 持有天数到了但没触发止盈/止损：<br>
-&nbsp;&nbsp;&nbsp;&nbsp;→ 若此时<b style="color:#5eba7d;">盈利</b>：将止损上移到买入成本价，再观察1~2天<br>
-&nbsp;&nbsp;&nbsp;&nbsp;→ 若此时<b style="color:#e06060;">亏损</b>：收盘前无条件卖出，不恋战<br>
-<b style="color:#7a869a;">仓位:</b> 单只股票不超过建议仓位，总持仓不超过3~5只
+<b style="color:#e06060;">❶ 止损(最高优先):</b> 股价跌破止损价 → 无条件卖出, 这是铁律<br>
+<b style="color:#5eba7d;">❷ 止盈:</b> 股价触及止盈目标 → 卖出锁利<br>
+<b style="color:#f0a050;">❸ 追踪止损:</b> 盈利后从高点回落超1ATR → 卖出保护利润<br>
+<b style="color:#94a3b8;">❹ 有效期兜底:</b> 以上都没触发? 超过有效期后止损自动收紧, 让价格做最终裁判<br>
+<b style="color:#5eba7d;">买入:</b> 在"买入价"附近挂限价单, 不追高超过"最高可接受价"<br>
+<b style="color:#7a869a;">仓位:</b> 单只股票不超过建议仓位(Kelly公式), 总持仓不超过3~5只
 </div>
 </div>""", unsafe_allow_html=True)
             
@@ -1128,6 +1137,16 @@ elif page == "💼 我的持仓":
             total_pnl += pnl
 
             pnl_sign = "+" if r['pnl_pct'] >= 0 else ""
+            
+            # 预测有效期状态
+            days_held = r.get('days_held', 0)
+            est_days = r.get('est_hold_days', 10)
+            time_phase = r.get('time_phase', 1)
+            phase_name = r.get('time_phase_name', '价格主导')
+            phase_icons = {1: '🟢', 2: '🟡', 3: '🟠', 4: '🔴'}
+            phase_icon = phase_icons.get(time_phase, '⚪')
+            time_display = f"{phase_icon}{days_held}/{est_days:.0f}天"
+            
             pos_rows.append({
                 '代码': r['stock_code'],
                 '名称': r['stock_name'],
@@ -1135,10 +1154,11 @@ elif page == "💼 我的持仓":
                 '现价': f"{r['current_price']:.2f}" if r['current_price'] > 0 else "-",
                 '数量': r.get('shares', 0),
                 '盈亏%': f"{pnl_sign}{r['pnl_pct']:.1f}%" if r['current_price'] > 0 else "-",
-                '止损价': f"{r['stop_price']:.2f}",
+                '当前止损': f"{r['stop_price']:.2f}",
                 '止盈价': f"{r['target_price']:.2f}",
+                '有效期': time_display,
+                '止损状态': phase_name,
                 '建议': r['advice'],
-                '买入日期': r['buy_date'],
             })
 
         # 概要卡片
@@ -1160,6 +1180,64 @@ elif page == "💼 我的持仓":
         if pos_rows:
             st.markdown("#### 📋 持仓明细")
             st.dataframe(pd.DataFrame(pos_rows), width='stretch', hide_index=True)
+            
+            # 卖出提醒 (逐只展示)
+            alerts_exist = any(r.get('alerts') for r in monitor_results)
+            if alerts_exist:
+                st.markdown("#### 🔔 退出信号 & 止损状态")
+                for r in monitor_results:
+                    alerts = r.get('alerts', [])
+                    if not alerts:
+                        continue
+                    
+                    days_held = r.get('days_held', 0)
+                    est_days = r.get('est_hold_days', 10)
+                    time_phase = r.get('time_phase', 1)
+                    phase_name = r.get('time_phase_name', '')
+                    original_stop = r.get('original_stop', r.get('stop_price', 0))
+                    current_stop = r.get('stop_price', 0)
+                    advice = r.get('advice', '')
+                    
+                    # 颜色根据紧急程度
+                    if advice == '立即卖出':
+                        border_color = '#e06060'
+                        bg_color = 'rgba(224,96,96,0.08)'
+                    elif advice == '建议卖出':
+                        border_color = '#f0a050'
+                        bg_color = 'rgba(240,160,80,0.08)'
+                    else:
+                        border_color = '#5eba7d'
+                        bg_color = 'rgba(94,186,125,0.06)'
+                    
+                    alert_html = "<br>".join([f"· {a}" for a in alerts])
+                    
+                    # 止损收紧幅度
+                    stop_tighten = ""
+                    if time_phase >= 2 and original_stop > 0 and current_stop > original_stop:
+                        tighten_pct = (current_stop - original_stop) / r.get('buy_price', 1) * 100
+                        stop_tighten = f"<br><span style='color:#f0a050;'>止损已从 {original_stop:.2f} 收紧至 {current_stop:.2f} (上移{tighten_pct:.1f}%)</span>"
+                    
+                    # 时间进度条
+                    progress_pct = min(days_held / est_days * 100, 100) if est_days > 0 else 0
+                    bar_color = '#5eba7d' if time_phase <= 1 else ('#f0a050' if time_phase <= 2 else '#e06060')
+                    
+                    st.markdown(f"""
+<div style="background:{bg_color};border-left:3px solid {border_color};border-radius:8px;padding:12px 16px;margin-bottom:8px;">
+<div style="display:flex;justify-content:space-between;align-items:center;">
+<span style="color:#e2e8f0;font-weight:700;">{r['stock_name']}({r['stock_code']})</span>
+<span style="color:{border_color};font-weight:700;font-size:14px;">{advice}</span>
+</div>
+<div style="margin:8px 0;">
+<div style="background:rgba(255,255,255,0.08);border-radius:4px;height:6px;overflow:hidden;">
+<div style="background:{bar_color};height:100%;width:{progress_pct}%;border-radius:4px;transition:width 0.3s;"></div>
+</div>
+<div style="display:flex;justify-content:space-between;margin-top:4px;">
+<span style="color:#7a869a;font-size:11px;">持有 {days_held}天 / 有效期 {est_days:.0f}天</span>
+<span style="color:#7a869a;font-size:11px;">{phase_name}</span>
+</div>
+</div>
+<div style="color:#cbd5e1;font-size:12px;line-height:1.7;">{alert_html}{stop_tighten}</div>
+</div>""", unsafe_allow_html=True)
 
             # 关闭持仓
             st.markdown("##### 关闭已卖出的持仓")
@@ -1436,7 +1514,7 @@ elif page == "💼 我的持仓":
 · 单只股票不超过 <b>¥{max_single:,.0f}</b>（总资金{max_per_stock_pct*100:.0f}%）<br>
 · 严格按AI操作清单的 <b style="color:#5eba7d;">买入价</b> 挂限价单，不追高超过「最高可接受价」<br>
 · 触及 <b style="color:#e06060;">止盈价</b> 立即卖出，跌破 <b style="color:#94a3b8;">止损价</b> 无条件卖出<br>
-· 持有到期未触发止盈/止损：盈利则上移止损再观察1~2天，亏损则收盘前清仓<br>
+· 退出优先级: ❶止损(铁律) ❷止盈 ❸追踪止损 ❹超有效期止损收紧(价格做最终裁判)<br>
 · 保留 <b>{reserve_pct*100:.0f}%</b> 现金应对突发机会或加仓
 </div>
 </div>
