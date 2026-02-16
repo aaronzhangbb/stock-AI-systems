@@ -303,6 +303,17 @@ def run_daily_job():
     except Exception as e:
         logger.error(f"AI三层扫描失败: {e}", exc_info=True)
 
+    # ========== 2.5 AI自动模拟交易 ==========
+    auto_trade_result = {'sell_actions': [], 'buy_actions': [], 'summary': ''}
+    try:
+        from src.trading.auto_trader import AutoTrader
+        logger.info("第2.5步: AI自动模拟交易...")
+        auto_trader = AutoTrader(account)
+        auto_trade_result = auto_trader.execute()
+        logger.info(f"自动交易: {auto_trade_result['summary']}")
+    except Exception as e:
+        logger.error(f"AI自动交易失败: {e}", exc_info=True)
+
     # ========== 3. 检查持仓卖出时机 ==========
     logger.info("第3步: 检查持仓卖出...")
     all_positions = check_all_manual_positions(account)
@@ -337,10 +348,25 @@ def run_daily_job():
     if sell_alert_list:
         sell_text = format_sell_alerts_text(sell_alert_list)
 
+    # 构建自动交易报告文本
+    auto_trade_text = ""
+    if auto_trade_result.get('sell_actions') or auto_trade_result.get('buy_actions'):
+        at_lines = ["\n🤖 AI自动交易报告\n" + "=" * 40]
+        for sa in auto_trade_result.get('sell_actions', []):
+            at_lines.append(f"  卖出 {sa['stock_name']}({sa['stock_code']}) @{sa['price']:.2f} "
+                            f"盈亏{sa['pnl']:+,.0f}({sa['pnl_pct']:+.1f}%) | {sa['reason'][:30]}")
+        for ba in auto_trade_result.get('buy_actions', []):
+            at_lines.append(f"  买入 {ba['stock_name']}({ba['stock_code']}) @{ba['price']:.2f} "
+                            f"x{ba['shares']}股 AI={ba['ai_score']} 止损{ba['sell_stop']:.2f}")
+        at_lines.append(f"摘要: {auto_trade_result.get('summary', '')}")
+        auto_trade_text = "\n".join(at_lines)
+
     # 组装邮件正文
     body_parts = []
     if sentiment_text:
         body_parts.append(sentiment_text)
+    if auto_trade_text:
+        body_parts.append(auto_trade_text)
     if ai_action_text:
         body_parts.append(ai_action_text)
     if sell_text:

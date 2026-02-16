@@ -1111,8 +1111,8 @@ elif page == "💼 我的持仓":
 
     account = get_paper_account()
 
-    # --- Tab: 账户总览 / 录入买入 / 录入卖出 / 历史交易 / 仓位建议 ---
-    tab_overview, tab_input, tab_sell, tab_history, tab_sizing = st.tabs(["📊 账户总览", "✏️ 录入买入", "📤 录入卖出", "📜 历史交易", "📐 仓位建议"])
+    # --- Tab: 账户总览 / AI虚拟盘 / 录入买入 / 录入卖出 / 历史交易 / 仓位建议 ---
+    tab_overview, tab_sim, tab_input, tab_sell, tab_history, tab_sizing = st.tabs(["📊 账户总览", "🤖 AI虚拟盘", "✏️ 录入买入", "📤 录入卖出", "📜 历史交易", "📐 仓位建议"])
 
     with tab_overview:
         # 获取持仓和当前价格
@@ -1261,6 +1261,94 @@ elif page == "💼 我的持仓":
 <div style="color:#7a869a;font-size:14px;margin-top:8px;">请到「✏️ 录入买入」标签页录入你的买入操作</div>
 </div>
 """, unsafe_allow_html=True)
+
+    # ---- AI虚拟盘 标签 ----
+    with tab_sim:
+        st.markdown("#### 🤖 AI 虚拟盘持仓")
+        st.markdown('<span style="color:#7a869a;font-size:13px;">AI自动交易引擎买入的虚拟持仓（与你的真实操作互不影响）</span>', unsafe_allow_html=True)
+
+        sim_positions = account.get_positions()
+        sim_prices = {}
+        if not sim_positions.empty:
+            from src.data.data_fetcher import batch_get_realtime_prices as _brp
+            _sim_codes = sim_positions['stock_code'].tolist()
+            with st.spinner(f"获取 {len(_sim_codes)} 只虚拟盘实时价格..."):
+                _sim_rt = _brp(_sim_codes)
+            for _c, _info in _sim_rt.items():
+                if _info.get('close', 0) > 0:
+                    sim_prices[_c] = _info['close']
+
+        sim_equity = account.get_total_equity(sim_prices)
+
+        # 概览卡片
+        sim_pnl_color = "#e06060" if sim_equity['total_profit'] >= 0 else "#5eba7d"
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        for col, label, val in [
+            (sc1, "虚拟初始资金", f"¥{sim_equity['initial_capital']:,.0f}"),
+            (sc2, "虚拟可用现金", f"¥{sim_equity['cash']:,.0f}"),
+            (sc3, "虚拟总资产", f"¥{sim_equity['total_equity']:,.0f}"),
+            (sc4, "虚拟总收益", f"{sim_equity['total_profit_pct']:.2f}%"),
+        ]:
+            with col:
+                vc = sim_pnl_color if label in ['虚拟总收益', '虚拟总资产'] else '#e8edf5'
+                st.markdown(f'<div class="signal-card"><div class="metric-label">{label}</div><div class="metric-value" style="color:{vc};font-size:20px;">{val}</div></div>', unsafe_allow_html=True)
+
+        if sim_equity['positions']:
+            st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+            st.markdown("##### 持仓明细")
+
+            sim_rows = []
+            for p in sim_equity['positions']:
+                pnl_s = "+" if p['profit_pct'] >= 0 else ""
+                sim_rows.append({
+                    '代码': p['code'],
+                    '名称': p['name'],
+                    '数量': p['shares'],
+                    '成本价': f"{p['avg_cost']:.2f}",
+                    '现价': f"{p['current_price']:.2f}",
+                    '盈亏': f"¥{p['profit']:,.0f}",
+                    '收益率': f"{pnl_s}{p['profit_pct']:.1f}%",
+                    '市值': f"¥{p['value']:,.0f}",
+                })
+            st.dataframe(pd.DataFrame(sim_rows), width='stretch', hide_index=True)
+
+            # 仓位分布柱状
+            if len(sim_equity['positions']) > 1:
+                st.markdown("##### 仓位分布")
+                # go (plotly.graph_objects) 已在顶部导入
+                names = [p['name'] for p in sim_equity['positions']]
+                weights = [p['value'] / sim_equity['total_equity'] * 100 for p in sim_equity['positions']]
+                colors = ['#e06060' if p['profit_pct'] >= 0 else '#5eba7d' for p in sim_equity['positions']]
+                fig_sim = go.Figure(go.Bar(x=names, y=weights, marker_color=colors, text=[f"{w:.0f}%" for w in weights], textposition='outside'))
+                fig_sim.update_layout(
+                    height=250, template="plotly_dark", paper_bgcolor='#121620', plot_bgcolor='#161b26',
+                    yaxis_title="仓位占比 %", margin=dict(l=0, r=0, t=10, b=0),
+                    font=dict(color='#8a95a8', size=12),
+                    xaxis=dict(gridcolor='#252d3d'), yaxis=dict(gridcolor='#252d3d'),
+                )
+                st.plotly_chart(fig_sim, use_container_width=True)
+
+            # 自动交易日志
+            st.markdown("##### 最近交易记录")
+            from src.trading.auto_trader import AutoTrader as _AT
+            _at = _AT(account)
+            _log = _at.get_trade_log_df(limit=20)
+            if not _log.empty:
+                _show = ['trade_date', 'stock_name', 'action', 'price', 'shares', 'pnl', 'pnl_pct', 'ai_score', 'reason']
+                _avail = [c for c in _show if c in _log.columns]
+                _disp = _log[_avail].rename(columns={
+                    'trade_date': '日期', 'stock_name': '名称', 'action': '操作',
+                    'price': '价格', 'shares': '数量', 'pnl': '盈亏',
+                    'pnl_pct': '收益%', 'ai_score': 'AI分', 'reason': '原因'
+                })
+                st.dataframe(_disp, width='stretch', hide_index=True)
+        else:
+            st.markdown("""
+<div class="signal-card" style="text-align:center;padding:40px;">
+<div style="font-size:48px;margin-bottom:16px;">🤖</div>
+<div style="color:#cbd5e1;font-size:16px;">AI虚拟盘暂无持仓</div>
+<div style="color:#7a869a;font-size:14px;margin-top:8px;">前往「🎮 模拟交易 → AI自动交易」页面点击一键执行</div>
+</div>""", unsafe_allow_html=True)
 
     with tab_input:
         st.markdown("#### ✏️ 录入买入信息")
@@ -1529,7 +1617,7 @@ elif page == "💼 我的持仓":
 # ================================================================
 elif page == "🎮 模拟交易":
     st.markdown('<p class="header-glow">🎮 模拟交易</p>', unsafe_allow_html=True)
-    st.markdown('<p class="header-sub">PAPER TRADING · 虚拟资金模拟买卖 · 验证策略效果</p>', unsafe_allow_html=True)
+    st.markdown('<p class="header-sub">PAPER TRADING · AI自动买卖 · 绩效追踪 · 策略进化</p>', unsafe_allow_html=True)
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
     account = get_paper_account()
@@ -1563,10 +1651,296 @@ elif page == "🎮 模拟交易":
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-    # Tab: 买卖操作 / 持仓 / 交易记录
-    trade_tabs = st.tabs(["🔄 模拟买卖", "📦 模拟持仓", "📜 交易记录"])
+    # ============================================================
+    # 4个标签页
+    # ============================================================
+    trade_tabs = st.tabs(["🤖 AI自动交易", "📊 绩效仪表盘", "🧬 策略进化", "🔄 手动买卖"])
 
+    # ---- TAB 1: AI 自动交易 ----
     with trade_tabs[0]:
+        from src.trading.auto_trader import AutoTrader
+
+        st.markdown("##### AI 一键执行交易决策")
+        st.markdown(f"""
+<div class="signal-card" style="padding:12px 16px;">
+<div style="color:#cbd5e1;font-size:13px;line-height:1.8;">
+<b>工作流程:</b> 读取AI扫描推荐 → 检查持仓卖出信号 → 筛选新标的买入<br>
+<b>当前参数:</b> 评分阈值≥{config.AUTO_SCORE_THRESHOLD} · 最大持仓{config.AUTO_MAX_POSITIONS}只 · Kelly仓位{'开启' if config.AUTO_USE_KELLY_SIZE else '关闭'}
+</div>
+</div>""", unsafe_allow_html=True)
+
+        col_exec1, col_exec2 = st.columns([3, 1])
+        with col_exec1:
+            if st.button("🤖 AI一键执行交易", type="primary", key="auto_exec", use_container_width=True):
+                auto_trader = AutoTrader(account)
+                with st.spinner("AI自动交易引擎运行中... (检查持仓→筛选标的→执行买卖)"):
+                    exec_result = auto_trader.execute()
+                st.session_state['last_auto_result'] = exec_result
+                st.rerun()
+        with col_exec2:
+            auto_status = "开启" if config.AUTO_ENABLED else "关闭"
+            st.markdown(f'<div class="signal-card" style="text-align:center;padding:8px;"><span style="color:#7a869a;">状态:</span> <span style="color:{"#5eba7d" if config.AUTO_ENABLED else "#e06060"};font-weight:700;">{auto_status}</span></div>', unsafe_allow_html=True)
+
+        # 显示上次执行结果
+        last_result = st.session_state.get('last_auto_result')
+        if last_result:
+            st.markdown(f"<div class='signal-card' style='padding:10px 16px;'><span style='color:#5b8def;font-weight:700;'>{last_result['summary']}</span> <span style='color:#7a869a;'>({last_result['timestamp']})</span></div>", unsafe_allow_html=True)
+
+            # 卖出操作
+            if last_result.get('sell_actions'):
+                st.markdown("###### 卖出操作")
+                for sa in last_result['sell_actions']:
+                    pnl_c = "#e06060" if sa['pnl'] >= 0 else "#5eba7d"
+                    st.markdown(f"""
+<div style="background:rgba(224,96,96,0.06);border-left:3px solid {pnl_c};border-radius:6px;padding:8px 14px;margin-bottom:6px;">
+<b style="color:#e2e8f0;">{sa['stock_name']}({sa['stock_code']})</b>
+<span style="color:#7a869a;margin-left:12px;">@{sa['price']:.2f} × {sa['shares']}股</span>
+<span style="color:{pnl_c};margin-left:12px;font-weight:700;">盈亏 {sa['pnl']:+,.0f}({sa['pnl_pct']:+.1f}%)</span>
+<br><span style="color:#94a3b8;font-size:12px;">{sa['reason']}</span>
+</div>""", unsafe_allow_html=True)
+
+            # 买入操作
+            if last_result.get('buy_actions'):
+                st.markdown("###### 买入操作")
+                for ba in last_result['buy_actions']:
+                    st.markdown(f"""
+<div style="background:rgba(94,186,125,0.06);border-left:3px solid #5eba7d;border-radius:6px;padding:8px 14px;margin-bottom:6px;">
+<b style="color:#e2e8f0;">{ba['stock_name']}({ba['stock_code']})</b>
+<span style="color:#7a869a;margin-left:12px;">@{ba['price']:.2f} × {ba['shares']}股 = ¥{ba['cost']:,.0f}</span>
+<br><span style="color:#94a3b8;font-size:12px;">AI评分 {ba['ai_score']} · 止损 {ba['sell_stop']:.2f} · 目标 {ba['sell_target']:.2f} · 盈亏比 {ba['risk_reward']:.1f}</span>
+</div>""", unsafe_allow_html=True)
+
+            # 跳过的候选
+            if last_result.get('skipped'):
+                with st.expander(f"跳过的候选 ({len(last_result['skipped'])}个)"):
+                    for sk in last_result['skipped']:
+                        st.markdown(f"- **{sk.get('name','')}**({sk.get('code','')}): {sk.get('reason','')}")
+
+        # ===== 当前 AI 持仓 =====
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+        st.markdown("##### 当前 AI 持仓")
+
+        if equity['positions']:
+            ai_pos_rows = []
+            for p in equity['positions']:
+                pnl_sign = "+" if p['profit_pct'] >= 0 else ""
+                pnl_c = "#e06060" if p['profit_pct'] >= 0 else "#5eba7d"
+                ai_pos_rows.append({
+                    '代码': p['code'],
+                    '名称': p['name'],
+                    '数量': f"{p['shares']}股",
+                    '成本': f"¥{p['avg_cost']:.2f}",
+                    '现价': f"¥{p['current_price']:.2f}",
+                    '盈亏': f"¥{p['profit']:,.0f}",
+                    '收益率': f"{pnl_sign}{p['profit_pct']:.1f}%",
+                    '市值': f"¥{p['value']:,.0f}",
+                })
+            st.dataframe(pd.DataFrame(ai_pos_rows), width='stretch', hide_index=True)
+
+            # 仓位分布
+            total_stock = equity['stock_value']
+            if total_stock > 0:
+                pos_cols = st.columns(min(len(equity['positions']), 5))
+                for i, p in enumerate(equity['positions'][:5]):
+                    weight = p['value'] / equity['total_equity'] * 100
+                    pc = "#e06060" if p['profit_pct'] >= 0 else "#5eba7d"
+                    with pos_cols[i]:
+                        st.markdown(f"""
+<div class="signal-card" style="text-align:center;padding:8px;">
+<div style="color:#e2e8f0;font-weight:700;font-size:13px;">{p['name']}</div>
+<div style="color:{pc};font-size:16px;font-weight:700;">{p['profit_pct']:+.1f}%</div>
+<div style="color:#7a869a;font-size:11px;">仓位 {weight:.0f}%</div>
+</div>""", unsafe_allow_html=True)
+        else:
+            st.info("暂无 AI 持仓。点击上方「AI一键执行交易」开始。")
+
+        # ===== AI 交易日志 =====
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+        st.markdown("##### 自动交易日志")
+        auto_trader_log = AutoTrader(account)
+        log_df = auto_trader_log.get_trade_log_df(limit=30)
+        if not log_df.empty:
+            show_cols = ['trade_date', 'stock_name', 'action', 'price', 'shares', 'pnl', 'pnl_pct', 'ai_score', 'reason']
+            available_cols = [c for c in show_cols if c in log_df.columns]
+            display_df = log_df[available_cols].copy()
+            col_names = {
+                'trade_date': '日期', 'stock_name': '名称', 'action': '操作',
+                'price': '价格', 'shares': '数量', 'pnl': '盈亏', 'pnl_pct': '收益%',
+                'ai_score': 'AI分', 'reason': '原因'
+            }
+            display_df = display_df.rename(columns=col_names)
+            st.dataframe(display_df, width='stretch', hide_index=True)
+        else:
+            st.info("暂无自动交易记录。点击上方「AI一键执行交易」开始。")
+
+    # ---- TAB 2: 绩效仪表盘 ----
+    with trade_tabs[1]:
+        from src.trading.performance import PerformanceAnalyzer
+        perf = PerformanceAnalyzer()
+        metrics = perf.compute_basic_metrics()
+
+        st.markdown("##### 核心绩效指标")
+        mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
+        metric_items = [
+            (mc1, "总交易", f"{metrics['total_trades']}笔", '#e8edf5'),
+            (mc2, "胜率", f"{metrics['win_rate']}%", '#5eba7d' if metrics['win_rate'] >= 50 else '#e06060'),
+            (mc3, "总收益", f"{metrics['total_return_pct']}%", '#e06060' if metrics['total_return_pct'] >= 0 else '#5eba7d'),
+            (mc4, "最大回撤", f"{metrics['max_drawdown_pct']}%", '#e06060' if metrics['max_drawdown_pct'] > -10 else '#ff4444'),
+            (mc5, "Sharpe", f"{metrics['sharpe_ratio']}", '#5eba7d' if metrics['sharpe_ratio'] > 1 else '#f0a050'),
+            (mc6, "利润因子", f"{metrics['profit_factor']}", '#5eba7d' if metrics['profit_factor'] > 1 else '#e06060'),
+        ]
+        for col, label, val, color in metric_items:
+            with col:
+                st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">{label}</div><div style="color:{color};font-size:20px;font-weight:700;">{val}</div></div>', unsafe_allow_html=True)
+
+        # 盈亏细项
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+        dc1, dc2, dc3, dc4 = st.columns(4)
+        detail_items = [
+            (dc1, "平均盈利", f"{metrics['avg_win_pct']}%", '#5eba7d'),
+            (dc2, "平均亏损", f"{metrics['avg_loss_pct']}%", '#e06060'),
+            (dc3, "单笔最佳", f"{metrics['max_single_win']}%", '#5eba7d'),
+            (dc4, "平均持有", f"{metrics['avg_hold_days']}天", '#e8edf5'),
+        ]
+        for col, label, val, color in detail_items:
+            with col:
+                st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">{label}</div><div style="color:{color};font-size:18px;font-weight:700;">{val}</div></div>', unsafe_allow_html=True)
+
+        # 资产曲线
+        equity_curve = perf.get_equity_curve()
+        if not equity_curve.empty and len(equity_curve) >= 2:
+            st.markdown("##### 资产曲线")
+            fig_eq = go.Figure()
+            fig_eq.add_trace(go.Scatter(
+                x=equity_curve['date'], y=equity_curve['total_equity'],
+                fill='tozeroy', name='总资产',
+                line=dict(color='#5b8def', width=2), fillcolor='rgba(91,141,239,0.08)',
+            ))
+            fig_eq.add_hline(y=config.INITIAL_CAPITAL, line_dash="dash", line_color="#7a869a", opacity=0.5,
+                             annotation_text="初始资金")
+            fig_eq.update_layout(
+                height=300, template="plotly_dark", paper_bgcolor='#121620', plot_bgcolor='#161b26',
+                yaxis_title="总资产 (¥)", margin=dict(l=0, r=0, t=30, b=0),
+                font=dict(color='#8a95a8', size=12),
+                xaxis=dict(gridcolor='#252d3d'), yaxis=dict(gridcolor='#252d3d'),
+            )
+            st.plotly_chart(fig_eq, use_container_width=True)
+
+        # 已完成交易列表
+        completed = perf.get_completed_trades()
+        if not completed.empty:
+            st.markdown("##### 已完成交易")
+            show_cols_t = ['stock_name', 'buy_date', 'buy_price', 'sell_date', 'sell_price',
+                           'pnl_pct', 'hold_days', 'ai_score', 'sell_reason']
+            available_t = [c for c in show_cols_t if c in completed.columns]
+            disp_t = completed[available_t].copy()
+            col_map_t = {
+                'stock_name': '名称', 'buy_date': '买入日', 'buy_price': '买入价',
+                'sell_date': '卖出日', 'sell_price': '卖出价', 'pnl_pct': '收益%',
+                'hold_days': '持有天', 'ai_score': 'AI分', 'sell_reason': '卖出原因',
+            }
+            disp_t = disp_t.rename(columns=col_map_t)
+            st.dataframe(disp_t, width='stretch', hide_index=True)
+
+        # 退出原因分析
+        exit_analysis = perf.analyze_exit_reasons()
+        if exit_analysis:
+            st.markdown("##### 退出原因分布")
+            ea_cols = st.columns(len(exit_analysis))
+            for i, ea in enumerate(exit_analysis):
+                with ea_cols[i]:
+                    ea_color = '#e06060' if ea['avg_pnl_pct'] < 0 else '#5eba7d'
+                    st.markdown(f"""
+<div class="signal-card" style="text-align:center;">
+<div class="metric-label">{ea['reason']}</div>
+<div style="font-size:20px;font-weight:700;color:{ea_color};">{ea['count']}次</div>
+<div style="color:#7a869a;font-size:12px;">胜率{ea['win_rate']}% · 均收{ea['avg_pnl_pct']}%</div>
+</div>""", unsafe_allow_html=True)
+
+        if metrics['total_trades'] == 0:
+            st.markdown("""
+<div class="signal-card" style="text-align:center;padding:40px;">
+<div style="font-size:48px;margin-bottom:16px;">📊</div>
+<div style="color:#cbd5e1;font-size:16px;">暂无交易数据</div>
+<div style="color:#7a869a;font-size:14px;margin-top:8px;">前往「AI自动交易」标签页执行交易, 数据将自动积累</div>
+</div>""", unsafe_allow_html=True)
+
+    # ---- TAB 3: 策略进化 ----
+    with trade_tabs[2]:
+        from src.trading.strategy_learner import StrategyLearner
+        learner = StrategyLearner()
+
+        st.markdown("##### 策略学习与优化")
+
+        if st.button("🧬 运行策略学习", type="primary", key="run_learn"):
+            with st.spinner("分析交易数据, 提炼规律..."):
+                learn_result = learner.learn()
+            st.session_state['learn_result'] = learn_result
+
+        # 显示结果 (从 session 或文件加载)
+        learn_result = st.session_state.get('learn_result') or learner.load_latest_report()
+
+        if learn_result:
+            status = learn_result.get('status', '')
+            n_trades = learn_result.get('trade_count', 0)
+            reliability = learn_result.get('reliability', '')
+            gen_time = learn_result.get('generated_at', '')
+
+            reliability_map = {'high': ('高', '#5eba7d'), 'medium': ('中', '#f0a050'), 'low': ('低', '#e06060'), 'none': ('不足', '#7a869a')}
+            rel_label, rel_color = reliability_map.get(reliability, ('未知', '#7a869a'))
+
+            st.markdown(f"""
+<div class="signal-card" style="padding:10px 16px;">
+<span style="color:#e2e8f0;font-weight:700;">学习报告</span>
+<span style="color:#7a869a;margin-left:12px;">样本: {n_trades}笔</span>
+<span style="color:{rel_color};margin-left:12px;">可信度: {rel_label}</span>
+<span style="color:#7a869a;margin-left:12px;">{gen_time}</span>
+</div>""", unsafe_allow_html=True)
+
+            # 洞察卡片
+            insights = learn_result.get('insights', [])
+            for ins in insights:
+                conf_pct = int(ins.get('confidence', 0) * 100)
+                cat = ins.get('category', '')
+                cat_colors = {
+                    '评分阈值': '#5b8def', '止损精度': '#e06060', '止盈精度': '#5eba7d',
+                    '持有时间': '#f0a050', '整体评价': '#c084fc',
+                }
+                border_c = cat_colors.get(cat, '#7a869a')
+
+                st.markdown(f"""
+<div style="background:rgba(255,255,255,0.03);border-left:3px solid {border_c};border-radius:6px;padding:10px 14px;margin-bottom:8px;">
+<div style="display:flex;justify-content:space-between;">
+<span style="color:{border_c};font-weight:700;">{cat}</span>
+<span style="color:#7a869a;font-size:12px;">置信度 {conf_pct}%</span>
+</div>
+<div style="color:#cbd5e1;font-size:13px;margin-top:4px;">{ins.get('finding', '')}</div>
+<div style="color:#94a3b8;font-size:12px;margin-top:4px;">💡 {ins.get('suggestion', '')}</div>
+</div>""", unsafe_allow_html=True)
+
+            # 最优参数
+            opt = learn_result.get('optimal_params', {})
+            if opt:
+                st.markdown("##### 推荐参数")
+                oc1, oc2, oc3 = st.columns(3)
+                with oc1:
+                    st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">推荐评分阈值</div><div style="color:#5b8def;font-size:20px;font-weight:700;">{opt.get("score_threshold", "-")}</div></div>', unsafe_allow_html=True)
+                with oc2:
+                    st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">止损触发率</div><div style="color:#e06060;font-size:20px;font-weight:700;">{opt.get("stop_trigger_rate", 0)}%</div></div>', unsafe_allow_html=True)
+                with oc3:
+                    st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">止盈触发率</div><div style="color:#5eba7d;font-size:20px;font-weight:700;">{opt.get("tp_trigger_rate", 0)}%</div></div>', unsafe_allow_html=True)
+
+        else:
+            st.markdown("""
+<div class="signal-card" style="text-align:center;padding:40px;">
+<div style="font-size:48px;margin-bottom:16px;">🧬</div>
+<div style="color:#cbd5e1;font-size:16px;">暂无学习报告</div>
+<div style="color:#7a869a;font-size:14px;margin-top:8px;">点击上方「运行策略学习」按钮, 需要至少10笔已完成交易</div>
+</div>""", unsafe_allow_html=True)
+
+    # ---- TAB 4: 手动买卖 ----
+    with trade_tabs[3]:
+        st.markdown("##### 手动模拟买卖")
         stock_code_t = st.text_input("股票代码", value="", max_chars=6, key="trade_code", placeholder="输入6位代码")
         if stock_code_t and len(stock_code_t) == 6:
             stock_name_t = load_stock_name(stock_code_t)
@@ -1575,7 +1949,7 @@ elif page == "🎮 模拟交易":
                 curr_price = float(df_t.iloc[-1]['close'])
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.markdown(f"#### 🔴 买入 {stock_name_t}")
+                    st.markdown(f"#### 买入 {stock_name_t}")
                     bp = st.number_input("买入价格", value=curr_price, step=0.01, key="bp")
                     bs = st.number_input("买入股数", value=100, step=100, min_value=100, key="bs")
                     if st.button("确认买入", type="primary", width='stretch'):
@@ -1584,7 +1958,7 @@ elif page == "🎮 模拟交易":
                         if r['success']:
                             st.rerun()
                 with col2:
-                    st.markdown(f"#### 🟢 卖出 {stock_name_t}")
+                    st.markdown(f"#### 卖出 {stock_name_t}")
                     sp = st.number_input("卖出价格", value=curr_price, step=0.01, key="sp")
                     ss = st.number_input("卖出股数", value=100, step=100, min_value=100, key="ss")
                     if st.button("确认卖出", width='stretch'):
@@ -1593,7 +1967,9 @@ elif page == "🎮 模拟交易":
                         if r['success']:
                             st.rerun()
 
-    with trade_tabs[1]:
+        # 当前持仓
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+        st.markdown("##### 当前持仓")
         if equity['positions']:
             pos_data = [{'代码': p['code'], '名称': p['name'], '持仓': f"{p['shares']}股",
                          '成本': f"¥{p['avg_cost']:.2f}", '现价': f"¥{p['current_price']:.2f}",
@@ -1602,32 +1978,14 @@ elif page == "🎮 模拟交易":
         else:
             st.info("模拟盘暂无持仓")
 
-    with trade_tabs[2]:
+        # 交易记录
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+        st.markdown("##### 交易记录")
         trades = account.get_trades()
         if not trades.empty:
             dt = trades[['created_at', 'stock_code', 'stock_name', 'action', 'price', 'shares', 'profit']].copy()
             dt.columns = ['时间', '代码', '名称', '操作', '价格', '数量', '盈亏']
             st.dataframe(dt, width='stretch', hide_index=True)
-
-            # 收益曲线
-            sell_trades = trades[trades['action'] == '卖出'].copy()
-            if not sell_trades.empty:
-                sell_trades = sell_trades.sort_values('created_at')
-                sell_trades['cum_profit'] = sell_trades['profit'].cumsum()
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=sell_trades['created_at'], y=sell_trades['cum_profit'],
-                    fill='tozeroy', name='累计盈亏',
-                    line=dict(color='#5b8def', width=2), fillcolor='rgba(91,141,239,0.08)',
-                ))
-                fig.add_hline(y=0, line_dash="dash", line_color="#7a869a", opacity=0.5)
-                fig.update_layout(
-                    height=300, template="plotly_dark", paper_bgcolor='#121620', plot_bgcolor='#161b26',
-                    yaxis_title="累计盈亏 (¥)", margin=dict(l=0, r=0, t=10, b=0),
-                    font=dict(color='#8a95a8', size=12),
-                    xaxis=dict(gridcolor='#252d3d'), yaxis=dict(gridcolor='#252d3d'),
-                )
-                st.plotly_chart(fig, width='stretch')
         else:
             st.info("暂无交易记录")
 

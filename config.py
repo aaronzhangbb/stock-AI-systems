@@ -13,7 +13,7 @@ RSI_OVERBOUGHT = 80  # 超买阈值（高于此值不买入）
 RSI_OVERSOLD = 20    # 超卖阈值（低于此值不卖出）
 
 # ==================== 模拟账户参数 ====================
-INITIAL_CAPITAL = 100000.0   # 初始资金（10万元）
+INITIAL_CAPITAL = 1000000.0  # 初始资金（100万元，供AI虚拟盘50只股票用）
 COMMISSION_RATE = 0.0003     # 佣金费率（万三）
 MIN_COMMISSION = 5.0         # 最低佣金（5元）
 STAMP_TAX_RATE = 0.001       # 印花税（千一，仅卖出时收取）
@@ -66,6 +66,13 @@ MIN_SINGLE_POSITION = 0.05    # 单只最小仓位 5%
 RECOMMEND_TOP_N = 20          # 每日推荐股票数
 RECOMMEND_MIN_SCORE = 55      # 最低推荐评分
 STRATEGY_HOLD_DAYS = 5        # 策略验证持有天数
+
+# ==================== AI自动交易参数 ====================
+AUTO_SCORE_THRESHOLD = 80     # 自动买入最低AI评分
+AUTO_MAX_POSITIONS = 50       # 最大同时持仓数 (买入所有推荐)
+AUTO_SELL_URGENCY = 1         # 卖出紧急度阈值 (1=建议卖出+立即卖出, 2=仅立即卖出)
+AUTO_USE_KELLY_SIZE = True    # 使用Kelly仓位 (False则用固定POSITION_RATIO)
+AUTO_ENABLED = True           # 自动交易总开关
 
 # ==================== 数据库路径 ====================
 DB_PATH = "data/trading.db"  # SQLite 数据库路径
