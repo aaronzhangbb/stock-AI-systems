@@ -2,6 +2,34 @@
 A股量化交易辅助系统 - 全局配置文件
 """
 
+import os
+
+
+def _load_dotenv(dotenv_path: str = ".env"):
+    """
+    轻量加载 .env 到进程环境变量（不覆盖已存在环境变量）
+    避免引入额外依赖，兼容 Windows 本地运行。
+    """
+    if not os.path.exists(dotenv_path):
+        return
+    try:
+        with open(dotenv_path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception:
+        # 读取失败时保持默认配置，不影响主流程
+        pass
+
+
+_load_dotenv()
+
 # ==================== 策略参数 ====================
 # 双均线策略
 MA_SHORT = 5        # 短期均线天数
@@ -28,12 +56,16 @@ HISTORY_DAYS = 365           # 默认拉取历史天数
 ENABLE_NOTIFICATION = True   # 是否启用桌面弹窗提醒
 
 # ==================== 邮件通知参数 ====================
-EMAIL_ENABLE = True
-SMTP_HOST = "smtp.qq.com"
-SMTP_PORT = 465
-SMTP_USER = "360928477@qq.com"
-SMTP_PASSWORD = "mkapexeuhqosbghg"  # QQ邮箱需要授权码
-EMAIL_TO = ["360928477@qq.com"]
+EMAIL_ENABLE = os.getenv("EMAIL_ENABLE", "true").strip().lower() in ("1", "true", "yes", "on")
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.qq.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
+SMTP_USER = os.getenv("SMTP_USER", "360928477@qq.com")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")  # 从环境变量读取，避免明文凭据入库
+_email_to_env = os.getenv("EMAIL_TO", "")
+if _email_to_env.strip():
+    EMAIL_TO = [x.strip() for x in _email_to_env.split(",") if x.strip()]
+else:
+    EMAIL_TO = ["360928477@qq.com"]
 
 # ==================== 大模型参数（阿里云百炼） ====================
 BAILIAN_API_KEY = ""  # 建议通过环境变量 BAILIAN_API_KEY 配置

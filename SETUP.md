@@ -113,6 +113,17 @@ F:\project\my finance\
 
 ### 邮件通知参数
 
+推荐通过项目根目录 `.env` 文件配置（避免把授权码写入代码）：
+
+```env
+EMAIL_ENABLE=true
+SMTP_HOST=smtp.qq.com
+SMTP_PORT=465
+SMTP_USER=你的QQ邮箱
+SMTP_PASSWORD=你的QQ邮箱授权码
+EMAIL_TO=收件人1@qq.com,收件人2@qq.com
+```
+
 | 参数 | 默认值 | 说明 |
 |:---|:---|:---|
 | `EMAIL_ENABLE` | True | 是否启用邮件通知 |

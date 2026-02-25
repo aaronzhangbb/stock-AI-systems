@@ -1778,6 +1778,9 @@ elif page == "🎮 模拟交易":
         from src.trading.performance import PerformanceAnalyzer
         perf = PerformanceAnalyzer()
         metrics = perf.compute_basic_metrics()
+        # 无已完成交易时，用实时账户数据补充总收益（与顶部概览一致）
+        if metrics['total_trades'] == 0 and equity:
+            metrics['total_return_pct'] = round(equity.get('total_profit_pct', 0), 2)
 
         st.markdown("##### 核心绩效指标")
         mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
@@ -1858,11 +1861,19 @@ elif page == "🎮 模拟交易":
 </div>""", unsafe_allow_html=True)
 
         if metrics['total_trades'] == 0:
-            st.markdown("""
-<div class="signal-card" style="text-align:center;padding:40px;">
-<div style="font-size:48px;margin-bottom:16px;">📊</div>
-<div style="color:#cbd5e1;font-size:16px;">暂无交易数据</div>
-<div style="color:#7a869a;font-size:14px;margin-top:8px;">前往「AI自动交易」标签页执行交易, 数据将自动积累</div>
+            # 无已完成交易时，展示持仓与未实现盈亏
+            pos_count = len(positions) if not positions.empty else 0
+            unrealized_pnl = equity.get('total_profit', 0)
+            unrealized_pct = equity.get('total_profit_pct', 0)
+            pnl_c = '#5eba7d' if unrealized_pnl >= 0 else '#e06060'
+            st.markdown(f"""
+<div class="signal-card" style="padding:20px 24px;">
+<div style="color:#cbd5e1;font-size:15px;margin-bottom:8px;">📊 核心绩效指标说明</div>
+<div style="color:#7a869a;font-size:13px;line-height:1.7;">
+胜率、平均盈利、利润因子等指标仅统计<strong style="color:#e2e8f0;">已完成交易</strong>（买入并卖出）。<br>
+当前持仓 <strong style="color:#5b8def;">{pos_count} 只</strong>，未实现盈亏 <span style="color:{pnl_c};font-weight:700;">¥{unrealized_pnl:+,.0f} ({unrealized_pct:+.2f}%)</span>。<br>
+执行「AI一键执行交易」后，当持仓触发止损/止盈/追踪止损被卖出时，数据将自动积累。
+</div>
 </div>""", unsafe_allow_html=True)
 
     # ---- TAB 3: 策略进化 ----
@@ -2305,12 +2316,15 @@ elif page == "⚙️ 系统设置":
                     time_hint = "❌ 格式错误，请用 HH:MM"
             st.markdown(f"<div style='color:#94a3b8;font-size:13px;margin-top:8px;'>{time_hint}</div>", unsafe_allow_html=True)
 
-        btn_col1, btn_col2, btn_col3 = st.columns(3)
+        btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
         with btn_col1:
             enable_btn = st.button("✅ 启用定时任务", type="primary", width='stretch', key="sched_enable")
         with btn_col2:
             disable_btn = st.button("⏸️ 停用定时任务", width='stretch', key="sched_disable")
         with btn_col3:
+            sync_data_btn = st.button("📥 同步数据", width='stretch', key="sched_sync_data",
+                                      help="仅更新最新K线到本地缓存，不执行AI扫描/邮件")
+        with btn_col4:
             run_now_btn = st.button("▶️ 立即执行一次", width='stretch', key="sched_run_now")
 
         if enable_btn:
@@ -2348,6 +2362,21 @@ elif page == "⚙️ 系统设置":
                 except Exception as e:
                     st.error(f"执行失败: {e}")
             st.rerun()
+
+        if sync_data_btn:
+            bar = st.progress(0)
+            txt = st.empty()
+            try:
+                from daily_job import sync_stock_data
+                def on_progress(c, t, n):
+                    bar.progress(c / t if t > 0 else 0)
+                    txt.text(f"同步中 [{c}/{t}] {n}")
+                result = sync_stock_data(days=730, progress_callback=on_progress)
+                bar.progress(1.0)
+                txt.text("完成！")
+                st.success(f"同步完成！{result['message']}")
+            except Exception as e:
+                st.error(f"同步失败: {e}")
 
         if run_now_btn:
             st.info("正在后台启动每日任务...（请查看终端窗口了解进度）")

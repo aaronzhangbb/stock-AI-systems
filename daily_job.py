@@ -271,6 +271,35 @@ def run_ai_super_scan():
     }
 
 
+def sync_stock_data(days: int = 730, progress_callback=None) -> dict:
+    """
+    同步股市数据：增量更新本地K线缓存到最新
+    可单独调用，用于手动拉取最新行情，不执行AI扫描/邮件等后续步骤
+
+    参数:
+        days: 拉取历史天数（默认730天）
+        progress_callback: (current, total, stock_name) 进度回调
+
+    返回:
+        dict: {total, success, failed, message}
+    """
+    logger.info(f"========== 同步数据开始 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ==========")
+    scanner = MarketScanner()
+
+    def _cb(c, t, n, s):
+        if progress_callback:
+            progress_callback(c, t, n)
+
+    result = scanner.warmup_cache(days=days, progress_callback=_cb)
+    logger.info(f"========== 同步数据完成 成功={result['success']} 失败={result['failed']} / 共{result['total']} ==========")
+    return {
+        'total': result['total'],
+        'success': result['success'],
+        'failed': result['failed'],
+        'message': f"已更新 {result['success']}/{result['total']} 只股票",
+    }
+
+
 def run_daily_job():
     """执行每日收盘闭环任务（精简版 - 纯AI策略）"""
     logger.info(f"========== 每日闭环任务启动 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ==========")
@@ -292,7 +321,7 @@ def run_daily_job():
 
     # ========== 1. 增量更新缓存 ==========
     logger.info("第1步: 增量更新缓存...")
-    scanner.warmup_cache(days=730)
+    sync_stock_data(days=730)
     logger.info("缓存更新完成")
 
     # ========== 2. AI三层超级策略扫描 ==========
