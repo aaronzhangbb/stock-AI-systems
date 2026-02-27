@@ -130,15 +130,21 @@ class AutoTrader:
                     pass
         return prices
 
-    def execute(self) -> dict:
+    def execute(self, rescan: bool = False, progress_callback=None) -> dict:
         """
         执行一轮完整的自动交易决策
+
+        参数:
+            rescan: 是否在卖出后重新运行AI扫描再买入 (默认False用已有推荐)
+            progress_callback: 进度回调 fn(stage: str, message: str)
+                stage: 'sell' / 'scan' / 'buy' / 'snapshot' / 'done'
 
         返回:
             {
                 'sell_actions': [卖出操作列表],
                 'buy_actions': [买入操作列表],
                 'skipped': [跳过的候选],
+                'scan_result': {扫描结果摘要} or None,
                 'summary': '执行摘要文字',
                 'timestamp': '执行时间',
             }
@@ -146,25 +152,44 @@ class AutoTrader:
         if not config.AUTO_ENABLED:
             return {
                 'sell_actions': [], 'buy_actions': [], 'skipped': [],
+                'scan_result': None,
                 'summary': '自动交易已关闭 (AUTO_ENABLED=False)',
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
 
+        def _progress(stage, msg):
+            if progress_callback:
+                progress_callback(stage, msg)
+
         logger.info("=" * 50)
-        logger.info("AI自动交易引擎启动")
+        logger.info("AI自动交易引擎启动 (rescan=%s)", rescan)
         logger.info("=" * 50)
 
         sell_actions = []
         buy_actions = []
         skipped = []
+        scan_result = None
 
         # ========== 第一步: 检查持仓, 决定卖出 ==========
+        _progress('sell', '正在检查持仓，执行止盈止损卖出...')
         sell_actions = self._execute_sells()
+        sold_codes = {a['stock_code'] for a in sell_actions}
+        _progress('sell', f'卖出完成: {len(sell_actions)}只')
 
-        # ========== 第二步: 筛选新标的, 决定买入 ==========
-        buy_actions, skipped = self._execute_buys()
+        # ========== 第二步: 重新AI扫描 (可选) ==========
+        if rescan:
+            _progress('scan', '正在运行AI策略扫描，生成最新推荐 (耗时3~10分钟)...')
+            scan_result = self._refresh_ai_scores()
+            n_scored = scan_result.get('total_scored', 0) if scan_result else 0
+            _progress('scan', f'扫描完成: 评估{n_scored}只股票')
 
-        # ========== 第三步: 保存每日资产快照 ==========
+        # ========== 第三步: 筛选新标的, 决定买入 ==========
+        _progress('buy', '正在筛选标的，执行买入...')
+        buy_actions, skipped = self._execute_buys(exclude_codes=sold_codes)
+        _progress('buy', f'买入完成: {len(buy_actions)}只')
+
+        # ========== 第四步: 保存每日资产快照 ==========
+        _progress('snapshot', '保存资产快照...')
         self._save_daily_snapshot()
 
         # ========== 汇总 ==========
@@ -175,6 +200,8 @@ class AutoTrader:
         summary_parts = []
         if n_sell > 0:
             summary_parts.append(f"卖出{n_sell}只(盈亏¥{total_sell_pnl:+,.0f})")
+        if rescan:
+            summary_parts.append("已重新扫描")
         if n_buy > 0:
             summary_parts.append(f"买入{n_buy}只")
         if not summary_parts:
@@ -182,14 +209,27 @@ class AutoTrader:
 
         summary = f"AI自动交易完成: {', '.join(summary_parts)}"
         logger.info(summary)
+        _progress('done', summary)
 
         return {
             'sell_actions': sell_actions,
             'buy_actions': buy_actions,
             'skipped': skipped,
+            'scan_result': scan_result,
             'summary': summary,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         }
+
+    def _refresh_ai_scores(self) -> dict:
+        """重新运行AI扫描，生成最新推荐 (更新 ai_daily_scores.json)"""
+        try:
+            from daily_job import run_ai_super_scan
+            result = run_ai_super_scan()
+            logger.info("[扫描] AI扫描完成, %d只操作推荐", len(result.get('action_list', [])))
+            return result
+        except Exception as e:
+            logger.error("[扫描] AI扫描失败: %s", e, exc_info=True)
+            return {'action_list': [], 'total_scored': 0, 'error': str(e)}
 
     def _execute_sells(self) -> list:
         """检查持仓并执行卖出"""
@@ -283,10 +323,16 @@ class AutoTrader:
 
         return sell_actions
 
-    def _execute_buys(self) -> tuple:
-        """筛选标的并执行买入"""
+    def _execute_buys(self, exclude_codes: set = None) -> tuple:
+        """
+        筛选标的并执行买入
+
+        参数:
+            exclude_codes: 需要排除的股票代码集合 (如刚卖出的股票，防止立即回买)
+        """
         buy_actions = []
         skipped = []
+        exclude_codes = exclude_codes or set()
 
         # 当前持仓数
         positions = self.account.get_positions()
@@ -298,8 +344,11 @@ class AutoTrader:
                         current_count, config.AUTO_MAX_POSITIONS)
             return buy_actions, skipped
 
-        # 已持仓代码列表 (避免重复买入)
+        # 已持仓代码 + 刚卖出的代码 (避免重复买入/立即回买)
         held_codes = set(positions['stock_code'].tolist()) if not positions.empty else set()
+        blocked_codes = held_codes | exclude_codes
+        if exclude_codes:
+            logger.info("[买入] 排除刚卖出的 %d 只股票, 防止立即回买", len(exclude_codes))
 
         # 加载AI推荐
         recommendations = self._load_ai_recommendations()
@@ -316,7 +365,7 @@ class AutoTrader:
             buy_price = rec.get('buy_price', 0)
 
             # 过滤条件
-            if code in held_codes:
+            if code in blocked_codes:
                 continue
             if score < config.AUTO_SCORE_THRESHOLD:
                 continue
@@ -521,8 +570,9 @@ class AutoTrader:
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+    rescan = '--rescan' in sys.argv
     trader = AutoTrader()
-    result = trader.execute()
+    result = trader.execute(rescan=rescan)
     print(f"\n{result['summary']}")
     print(f"卖出: {len(result['sell_actions'])}笔")
     print(f"买入: {len(result['buy_actions'])}笔")

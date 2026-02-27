@@ -1664,7 +1664,7 @@ elif page == "🎮 模拟交易":
         st.markdown(f"""
 <div class="signal-card" style="padding:12px 16px;">
 <div style="color:#cbd5e1;font-size:13px;line-height:1.8;">
-<b>工作流程:</b> 读取AI扫描推荐 → 检查持仓卖出信号 → 筛选新标的买入<br>
+<b>工作流程:</b> 检查持仓卖出 → 重新AI扫描最新推荐 → 筛选新标的买入<br>
 <b>当前参数:</b> 评分阈值≥{config.AUTO_SCORE_THRESHOLD} · 最大持仓{config.AUTO_MAX_POSITIONS}只 · Kelly仓位{'开启' if config.AUTO_USE_KELLY_SIZE else '关闭'}
 </div>
 </div>""", unsafe_allow_html=True)
@@ -1673,8 +1673,16 @@ elif page == "🎮 模拟交易":
         with col_exec1:
             if st.button("🤖 AI一键执行交易", type="primary", key="auto_exec", use_container_width=True):
                 auto_trader = AutoTrader(account)
-                with st.spinner("AI自动交易引擎运行中... (检查持仓→筛选标的→执行买卖)"):
-                    exec_result = auto_trader.execute()
+                status_container = st.status("AI自动交易引擎运行中...", expanded=True)
+                with status_container:
+                    def _on_progress(stage, msg):
+                        stage_icons = {'sell': '📤', 'scan': '🔍', 'buy': '📥', 'snapshot': '📸', 'done': '✅'}
+                        icon = stage_icons.get(stage, '⏳')
+                        st.write(f"{icon} {msg}")
+
+                    exec_result = auto_trader.execute(rescan=True, progress_callback=_on_progress)
+
+                status_container.update(label=exec_result['summary'], state="complete", expanded=False)
                 st.session_state['last_auto_result'] = exec_result
                 st.rerun()
         with col_exec2:
