@@ -314,6 +314,140 @@ class PerformanceAnalyzer:
             })
         return results
 
+    def analyze_post_sell_performance(self) -> pd.DataFrame:
+        """
+        分析每笔已卖出交易的卖后行情，判断卖出时机是否合理。
+
+        返回 DataFrame 列:
+            stock_code, stock_name, sell_date, sell_price, sell_reason,
+            pnl_pct, hold_days,
+            post_5d_max_pct, post_10d_max_pct, post_20d_max_pct,
+            post_10d_close_pct, label
+        """
+        trades = self.get_completed_trades()
+        if trades.empty:
+            return pd.DataFrame()
+
+        from src.data.data_fetcher import get_history_data
+
+        results = []
+        for _, t in trades.iterrows():
+            code = t['stock_code']
+            sell_date = str(t['sell_date'])[:10]
+            sell_price = t['sell_price']
+            if sell_price <= 0:
+                continue
+
+            try:
+                df = get_history_data(code, days=400, use_cache=True)
+                if df.empty:
+                    continue
+
+                df['date_str'] = df['date'].astype(str).str[:10]
+                sell_idx_mask = df['date_str'] >= sell_date
+                if not sell_idx_mask.any():
+                    continue
+
+                sell_iloc = df.index[sell_idx_mask][0]
+                pos_in_df = df.index.get_loc(sell_iloc)
+                post_df = df.iloc[pos_in_df + 1:]
+
+                if post_df.empty:
+                    continue
+
+                post_5 = post_df.head(5)
+                post_10 = post_df.head(10)
+                post_20 = post_df.head(20)
+
+                post_5d_max = float(post_5['high'].max()) if not post_5.empty else sell_price
+                post_10d_max = float(post_10['high'].max()) if not post_10.empty else sell_price
+                post_20d_max = float(post_20['high'].max()) if not post_20.empty else sell_price
+                post_10d_close = float(post_10['close'].iloc[-1]) if len(post_10) >= 10 else (
+                    float(post_df['close'].iloc[-1]) if not post_df.empty else sell_price
+                )
+
+                post_5d_max_pct = round((post_5d_max - sell_price) / sell_price * 100, 2)
+                post_10d_max_pct = round((post_10d_max - sell_price) / sell_price * 100, 2)
+                post_20d_max_pct = round((post_20d_max - sell_price) / sell_price * 100, 2)
+                post_10d_close_pct = round((post_10d_close - sell_price) / sell_price * 100, 2)
+
+                if post_10d_max_pct >= 5:
+                    label = '卖早了'
+                elif t['pnl_pct'] < 0 and post_10d_close_pct < -2:
+                    label = '卖晚了'
+                elif post_10d_max_pct < 3:
+                    label = '卖对了'
+                else:
+                    label = '待观察'
+
+                results.append({
+                    'stock_code': code,
+                    'stock_name': t.get('stock_name', ''),
+                    'sell_date': sell_date,
+                    'sell_price': sell_price,
+                    'sell_reason': t.get('sell_reason', ''),
+                    'pnl_pct': t.get('pnl_pct', 0),
+                    'hold_days': t.get('hold_days', 0),
+                    'post_5d_max_pct': post_5d_max_pct,
+                    'post_10d_max_pct': post_10d_max_pct,
+                    'post_20d_max_pct': post_20d_max_pct,
+                    'post_10d_close_pct': post_10d_close_pct,
+                    'label': label,
+                })
+            except Exception:
+                continue
+
+        return pd.DataFrame(results) if results else pd.DataFrame()
+
+    def analyze_post_sell_by_reason(self) -> list:
+        """按卖出原因分组统计卖后表现"""
+        post_df = self.analyze_post_sell_performance()
+        if post_df.empty:
+            return []
+
+        reason_keywords = {
+            '止损': '止损',
+            '止盈': '止盈',
+            '追踪止损': '追踪止损',
+            '策略卖出': '策略卖出',
+            'AI评分衰减': 'AI评分衰减',
+            '共振': '共振',
+        }
+
+        def categorize(reason_str):
+            reason_str = str(reason_str)
+            if '追踪止损' in reason_str:
+                return '追踪止损'
+            if '止损' in reason_str:
+                return '止损'
+            if '止盈' in reason_str:
+                return '止盈'
+            if 'AI评分' in reason_str or '共振' in reason_str:
+                return '策略+AI确认'
+            if '策略卖出' in reason_str:
+                return '策略信号'
+            return '其他'
+
+        post_df['reason_cat'] = post_df['sell_reason'].apply(categorize)
+
+        results = []
+        for cat, group in post_df.groupby('reason_cat'):
+            n = len(group)
+            n_right = len(group[group['label'] == '卖对了'])
+            n_early = len(group[group['label'] == '卖早了'])
+            n_late = len(group[group['label'] == '卖晚了'])
+            results.append({
+                'reason': cat,
+                'count': n,
+                'right_pct': round(n_right / n * 100, 1) if n > 0 else 0,
+                'early_pct': round(n_early / n * 100, 1) if n > 0 else 0,
+                'late_pct': round(n_late / n * 100, 1) if n > 0 else 0,
+                'avg_post_10d_max': round(group['post_10d_max_pct'].mean(), 2),
+                'avg_post_10d_close': round(group['post_10d_close_pct'].mean(), 2),
+            })
+
+        return results
+
     def get_equity_curve(self) -> pd.DataFrame:
         """获取资产曲线数据"""
         return self._query_df("SELECT date, total_equity FROM daily_snapshot ORDER BY date")

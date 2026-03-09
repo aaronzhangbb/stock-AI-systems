@@ -100,11 +100,12 @@ RECOMMEND_MIN_SCORE = 55      # 最低推荐评分
 STRATEGY_HOLD_DAYS = 5        # 策略验证持有天数
 
 # ==================== AI自动交易参数 ====================
-AUTO_SCORE_THRESHOLD = 80     # 自动买入最低AI评分
+AUTO_SCORE_THRESHOLD = 75     # 自动买入最低AI评分 (三层融合final_score的合理门槛)
 AUTO_MAX_POSITIONS = 50       # 最大同时持仓数 (买入所有推荐)
 AUTO_SELL_URGENCY = 1         # 卖出紧急度阈值 (1=建议卖出+立即卖出, 2=仅立即卖出)
 AUTO_USE_KELLY_SIZE = True    # 使用Kelly仓位 (False则用固定POSITION_RATIO)
 AUTO_ENABLED = True           # 自动交易总开关
+AI_SELL_SCORE_DROP = 15       # 技术面卖出信号需 AI 评分下降超过此值才确认卖出
 
 # ==================== 数据库路径 ====================
 DB_PATH = "data/trading.db"  # SQLite 数据库路径

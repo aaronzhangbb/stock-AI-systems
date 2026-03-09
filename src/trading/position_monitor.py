@@ -42,13 +42,17 @@ def is_trading_time() -> bool:
 def check_single_position(stock_code: str, stock_name: str, buy_price: float,
                            buy_date: str, shares: int = 0,
                            use_realtime: bool = False,
-                           realtime_price: float = None) -> dict:
+                           realtime_price: float = None,
+                           ai_score_at_buy: float = 0,
+                           ai_score_current: float = 0) -> dict:
     """
     检查单只持仓股的卖出条件
 
     参数:
         use_realtime: 是否使用实时价格（盘中监控时设为True）
         realtime_price: 外部传入的实时价格（批量获取后传入，避免逐只请求）
+        ai_score_at_buy: 买入时的 AI 评分（用于技术面卖出确认）
+        ai_score_current: 当前最新 AI 评分（用于技术面卖出确认）
 
     返回:
         dict: {
@@ -79,6 +83,8 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
         'sell_signals': [],
         'price_source': 'close',
         'stop_method': 'fixed',
+        'ai_score_at_buy': ai_score_at_buy,
+        'ai_score_current': ai_score_current,
         # 时间衰减相关字段
         'days_held': 0,
         'est_hold_days': 10,
@@ -323,15 +329,36 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
                 f"止损收紧至{result['stop_price']:.2f}, 等待价格触发退出"
             )
 
-        # ❹ 策略卖出信号
+        # ❹ 策略卖出信号（有 AI 评分时需衰减确认或多信号共振，无 AI 评分时保持原始行为）
         try:
             sigs = run_all_strategies(df)
             sell_sigs = [s for s in sigs if s['signal'] == 'sell']
             if sell_sigs:
                 result['sell_signals'] = sell_sigs
                 names = ', '.join([s['strategy'] for s in sell_sigs])
-                result['alerts'].append(f"策略卖出信号（{names}）")
-                urgency = max(urgency, 1)
+                n_sell_sigs = len(sell_sigs)
+                has_ai_scores = ai_score_at_buy > 0 and ai_score_current > 0
+
+                if not has_ai_scores:
+                    result['alerts'].append(f"策略卖出信号（{names}）")
+                    urgency = max(urgency, 1)
+                else:
+                    score_drop = ai_score_at_buy - ai_score_current
+                    drop_threshold = getattr(config, 'AI_SELL_SCORE_DROP', 15)
+                    has_score_drop = score_drop >= drop_threshold
+                    has_multi_resonance = n_sell_sigs >= 2
+                    score_info = f" (AI评分:{ai_score_at_buy:.0f}→{ai_score_current:.0f},降{score_drop:.0f}分)"
+
+                    if has_multi_resonance or has_score_drop:
+                        if has_multi_resonance:
+                            result['alerts'].append(f"❹策略卖出信号×{n_sell_sigs}共振（{names}）{score_info}")
+                        else:
+                            result['alerts'].append(f"❹策略卖出+AI评分衰减（{names}）{score_info}")
+                        urgency = max(urgency, 1)
+                    else:
+                        result['alerts'].append(
+                            f"📋策略卖出信号（{names}）{score_info}[AI未确认,仅提醒]"
+                        )
         except Exception:
             pass
 

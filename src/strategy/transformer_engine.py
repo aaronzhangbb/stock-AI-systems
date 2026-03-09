@@ -154,16 +154,10 @@ class StockTransformer:
         print(f"  模型参数: {total_params:,} (可训练: {trainable_params:,})")
         print(f"  设备: {self.device}")
     
-    def build_dataset(self, cache, pool, progress_callback=None) -> Dict:
+    def build_dataset(self, cache, pool, progress_callback=None,
+                      max_total_samples: int = 800000) -> Dict:
         """
-        构建训练数据集
-        
-        返回: {
-            'X_train': (N, seq_len, 12),
-            'y_train': (N,),
-            'X_val': ..., 'y_val': ...,
-            'X_test': ..., 'y_test': ...
-        }
+        构建训练数据集，超过 max_total_samples 时截断以控制内存（避免 5.5GB+ 分配失败）
         """
         torch, _ = _get_torch()
         
@@ -174,9 +168,13 @@ class StockTransformer:
         all_X = []
         all_y = []
         all_dates = []
+        current_total = 0
+        rng = np.random.default_rng(42)
         
         total = len(valid_codes)
         for i, code in enumerate(valid_codes):
+            if current_total >= max_total_samples:
+                break
             if progress_callback and (i + 1) % 500 == 0:
                 progress_callback(i + 1, total)
             
@@ -213,16 +211,31 @@ class StockTransformer:
                 
                 # 过滤无效序列
                 valid = ~(np.isnan(seqs).any(axis=(1, 2)) | (np.abs(seqs).max(axis=(1, 2)) > 100))
+                seqs_ok = seqs[valid]
+                labels_ok = labels[valid]
+                dates_ok = dates[indices[valid]]
                 
-                all_X.append(seqs[valid])
-                all_y.append(labels[valid])
-                all_dates.extend(dates[indices[valid]].tolist())
+                # 控制总量，避免 np.concatenate 时分配超内存
+                room = max_total_samples - current_total
+                if len(seqs_ok) > room:
+                    idx = rng.choice(len(seqs_ok), room, replace=False)
+                    seqs_ok = seqs_ok[idx]
+                    labels_ok = labels_ok[idx]
+                    dates_ok = dates_ok[idx]
+                current_total += len(seqs_ok)
+                
+                all_X.append(seqs_ok)
+                all_y.append(labels_ok)
+                all_dates.extend(dates_ok.tolist())
                     
             except Exception:
                 continue
         
         if not all_X:
             return {}
+        
+        if current_total >= max_total_samples:
+            print(f"  样本数已限制至 {current_total:,}（约 {current_total * self.seq_len * 12 * 4 / 1024**3:.1f} GB，适配 16GB 内存）")
         
         X = np.concatenate(all_X, axis=0).astype(np.float32)
         y = np.concatenate(all_y, axis=0).astype(np.float32)
@@ -244,22 +257,38 @@ class StockTransformer:
         return dataset
     
     def train_model(self, dataset: Dict, epochs: int = 30, batch_size: int = 2048,
-                    lr: float = 1e-3, weight_decay: float = 1e-4) -> Dict:
+                    lr: float = 1e-3, weight_decay: float = 1e-4,
+                    max_train_samples: int = 1200000) -> Dict:
         """
         训练Transformer模型 (数据留在CPU, 批量传输到GPU)
+        当训练集过大时自动子采样以适配 8GB 显存/内存设备
         """
         torch, nn = _get_torch()
         from torch.utils.data import TensorDataset, DataLoader
+        import random
+        
+        X_train_np = dataset['X_train']
+        y_train_np = dataset['y_train']
+        n_total = len(X_train_np)
+        # 单样本约 2.8KB，80万样本约 2.2GB，可适配 8GB 设备
+        if n_total > max_train_samples:
+            rng = np.random.default_rng(42)
+            idx = rng.choice(n_total, max_train_samples, replace=False)
+            X_train_np = X_train_np[idx]
+            y_train_np = y_train_np[idx]
+            print(f"  训练集过大 ({n_total:,})，子采样至 {max_train_samples:,} 以节省内存")
         
         # 数据留在CPU, 用pin_memory加速传输
-        X_train = torch.FloatTensor(dataset['X_train'])
-        y_train = torch.FloatTensor(dataset['y_train'])
+        X_train = torch.FloatTensor(X_train_np)
+        y_train = torch.FloatTensor(y_train_np)
         X_val_np = dataset['X_val']
         y_val_np = dataset['y_val']
         
         train_ds = TensorDataset(X_train, y_train)
+        # pin_memory 仅在 GPU 时有效，CPU 会触发警告
+        use_pin = str(self.device).startswith('cuda')
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, 
-                                  drop_last=True, pin_memory=True, num_workers=0)
+                                  drop_last=True, pin_memory=use_pin, num_workers=0)
         
         # 正负样本比例 → 加权Loss
         pos_rate = dataset['pos_rate']

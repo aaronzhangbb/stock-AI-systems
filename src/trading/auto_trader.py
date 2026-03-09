@@ -157,6 +157,14 @@ class AutoTrader:
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
 
+        # 优先更新大盘情绪（确保侧边栏显示最新日期，不依赖后续扫描是否成功）
+        try:
+            from src.data.market_sentiment import get_market_sentiment
+            get_market_sentiment(verbose=False)
+            logger.info("[情绪] 大盘情绪已更新")
+        except Exception as e:
+            logger.warning("[情绪] 更新失败(不影响交易): %s", e)
+
         def _progress(stage, msg):
             if progress_callback:
                 progress_callback(stage, msg)
@@ -231,6 +239,34 @@ class AutoTrader:
             logger.error("[扫描] AI扫描失败: %s", e, exc_info=True)
             return {'action_list': [], 'total_scored': 0, 'error': str(e)}
 
+    def _load_ai_scores_map(self) -> dict:
+        """加载最新 AI 评分表 {stock_code: score}"""
+        score_path = os.path.join(DATA_DIR, 'ai_daily_scores.json')
+        if not os.path.exists(score_path):
+            return {}
+        try:
+            with open(score_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            items = data.get('top50', []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            return {r.get('stock_code', ''): r.get('final_score', 0) or r.get('ai_score', 0) for r in items if r.get('stock_code')}
+        except Exception:
+            return {}
+
+    def _get_buy_ai_score(self, stock_code: str) -> float:
+        """从 auto_trade_log 查询该股票最近一次买入时的 AI 评分"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT ai_score FROM auto_trade_log WHERE stock_code=? AND action='买入' ORDER BY created_at DESC LIMIT 1",
+                (stock_code,)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            return float(row[0]) if row and row[0] else 0
+        except Exception:
+            return 0
+
     def _execute_sells(self) -> list:
         """检查持仓并执行卖出"""
         sell_actions = []
@@ -239,6 +275,9 @@ class AutoTrader:
         if positions.empty:
             logger.info("[卖出] 无持仓, 跳过")
             return sell_actions
+
+        # 加载最新 AI 评分（用于技术面卖出确认）
+        ai_scores_map = self._load_ai_scores_map()
 
         # 批量获取实时价格
         codes = positions['stock_code'].tolist()
@@ -260,6 +299,9 @@ class AutoTrader:
             if isinstance(buy_date, str) and len(buy_date) > 10:
                 buy_date = buy_date[:10]
 
+            ai_score_buy = self._get_buy_ai_score(code)
+            ai_score_now = ai_scores_map.get(code, 0)
+
             try:
                 result = check_single_position(
                     stock_code=code,
@@ -269,6 +311,8 @@ class AutoTrader:
                     shares=shares,
                     use_realtime=False,
                     realtime_price=current_price,
+                    ai_score_at_buy=ai_score_buy,
+                    ai_score_current=ai_score_now,
                 )
             except Exception as e:
                 logger.error("[卖出] %s(%s) 检查失败: %s", name, code, e)
@@ -356,11 +400,11 @@ class AutoTrader:
             logger.info("[买入] 无AI推荐数据, 跳过")
             return buy_actions, skipped
 
-        # 筛选候选
+        # 筛选候选 (优先使用三层融合的 final_score，与「0.5×XGB+0.3×形态+0.2×Transformer」一致)
         candidates = []
         for rec in recommendations:
             code = rec.get('stock_code', '')
-            score = rec.get('ai_score', 0) or rec.get('final_score', 0)
+            score = rec.get('final_score', 0) or rec.get('ai_score', 0)
             buy_upper = rec.get('buy_upper', 0)
             buy_price = rec.get('buy_price', 0)
 

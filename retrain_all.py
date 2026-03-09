@@ -125,8 +125,10 @@ def train_layer1():
     neg_count = len(splits['y_train']) - pos_count
     scale_pos_weight = neg_count / (pos_count + 1)
 
+    # 优先 GPU，内存不足时自动回退 CPU（可设环境变量 XGBOOST_DEVICE=cpu 强制用 CPU）
+    xgb_device = os.environ.get('XGBOOST_DEVICE', 'cuda')
     params = {
-        'device': 'cuda', 'tree_method': 'hist',
+        'device': xgb_device, 'tree_method': 'hist',
         'objective': 'binary:logistic', 'eval_metric': ['auc', 'logloss'],
         'max_depth': 8, 'learning_rate': 0.05,
         'subsample': 0.8, 'colsample_bytree': 0.8,
@@ -137,12 +139,27 @@ def train_layer1():
     }
 
     evals_result = {}
-    model = xgb.train(
-        params, dtrain, num_boost_round=1000,
-        evals=[(dtrain, 'train'), (dval, 'val')],
-        evals_result=evals_result,
-        early_stopping_rounds=50, verbose_eval=100,
-    )
+    try:
+        model = xgb.train(
+            params, dtrain, num_boost_round=1000,
+            evals=[(dtrain, 'train'), (dval, 'val')],
+            evals_result=evals_result,
+            early_stopping_rounds=50, verbose_eval=100,
+        )
+    except Exception as e:
+        err_msg = str(e).lower()
+        if 'allocate' in err_msg or 'memory' in err_msg or 'cuda' in err_msg or 'oom' in err_msg:
+            print(f"  GPU 内存不足 ({e})，改用 CPU 训练...")
+            params['device'] = 'cpu'
+            evals_result = {}
+            model = xgb.train(
+                params, dtrain, num_boost_round=1000,
+                evals=[(dtrain, 'train'), (dval, 'val')],
+                evals_result=evals_result,
+                early_stopping_rounds=50, verbose_eval=100,
+            )
+        else:
+            raise
 
     best_round = model.best_iteration
     val_auc = evals_result['val']['auc'][best_round]

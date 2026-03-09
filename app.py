@@ -214,7 +214,7 @@ if pool_stats['board_count'] > 0:
                 _sd = _jss.load(_fss)
             _ss = _sd.get('sentiment_score', 50)
             _sl = _sd.get('sentiment_level', '未知')
-            _st = _sd.get('fetch_time', '')[:10]
+            _st = _sd.get('fetch_time', '')  # 完整时间戳，便于确认是否已更新
             _sc = '#4ade80' if _ss <= 35 else ('#fbbf24' if _ss <= 65 else '#ef4444')
             st.sidebar.markdown(f"""
     <div class="signal-card" style="padding:10px 14px;">
@@ -554,9 +554,9 @@ if page == "📡 每日信号":
 
         col_ai_btn1, col_ai_btn2 = st.columns([1, 1])
         with col_ai_btn1:
-            ai_scan_btn = st.button("🧠 运行AI超级策略扫描（三层融合）", type="primary", width='stretch')
+            ai_scan_btn = st.button("🧠 运行AI超级策略扫描（三层融合）", type="primary", use_container_width=True)
         with col_ai_btn2:
-            daily_push_btn = st.button("📧 执行每日任务（含邮件推送）", width='stretch')
+            daily_push_btn = st.button("📧 执行每日任务（含邮件推送）", use_container_width=True)
 
         # 执行每日任务（含邮件推送）
         if daily_push_btn:
@@ -573,154 +573,168 @@ if page == "📡 每日信号":
                 st.rerun()
 
         if ai_scan_btn:
-            try:
-                from src.strategy.ai_engine_v2 import AIScorer
-                from src.data.data_cache import DataCache as DC2
-                from src.data.stock_pool import StockPool as SP2
-                ai_scorer = AIScorer()
-                ai_cache = DC2()
-                ai_pool = SP2()
-                bar2 = st.progress(0)
-                txt2 = st.empty()
+            # 检查 XGBoost 模型是否存在（AI 扫描必需）
+            xgb_model_path = os.path.join('data', 'xgb_v2_model.json')
+            if not os.path.exists(xgb_model_path):
+                st.error(f"""
+**AI 策略扫描失败：模型文件不存在**
 
-                # 先增量更新缓存，确保使用最新K线数据
-                txt2.text("[0/3] 增量更新缓存（确保数据最新）...")
-                with st.spinner("更新缓存中..."):
-                    from src.strategy.scanner import MarketScanner as MS2
-                    _scanner2 = MS2()
-                    _scanner2.warmup_cache(days=730)
-                bar2.progress(0.1)
-                # 更新后重新加载缓存
-                ai_cache = DC2()
+请先完成模型训练：
+1. 进入 **系统设置** → **AI超级策略 — 模型训练**
+2. 若股票池为空，先点击「🔄 同步股票池」
+3. 若 K 线缓存为空，可先执行「📧 执行每日任务」以增量更新缓存
+4. 选择「仅第一层 XGBoost」并点击「🧠 开始训练」（约 5 分钟）
 
-                def ai_prog(c, t):
-                    bar2.progress(0.1 + min(c / t * 0.35, 0.35))
-                    txt2.text(f"[1/3] XGBoost评分: {c}/{t} ({c/t*100:.0f}%)")
-                with st.spinner("第1步: XGBoost评分全市场..."):
-                    ai_df = ai_scorer.scan_market(ai_cache, ai_pool, top_n=100, progress_callback=ai_prog)
-                bar2.progress(0.50)
-
-                # 第二步: 形态匹配
-                txt2.text("[2/3] 形态匹配中...")
-                pattern_scores = {}
+训练完成后即可使用 AI 策略扫描。
+""")
+            else:
                 try:
-                    from src.strategy.pattern_engine import PatternEngine
-                    pe_model_path = os.path.join('data', 'pattern_engine.pkl')
-                    if os.path.exists(pe_model_path):
-                        pe = PatternEngine.load(pe_model_path)
-                        top_codes = ai_df['stock_code'].tolist() if not ai_df.empty else []
-                        matched = 0
-                        for code in top_codes:
-                            try:
-                                kdf = ai_cache.load_kline(code)
-                                if kdf is not None:
-                                    pr = pe.predict_single(kdf)
-                                    if pr and pr['is_valid']:
-                                        pattern_scores[code] = pr
-                                        matched += 1
-                            except Exception:
-                                pass
-                        txt2.text(f"[2/3] 形态匹配完成: {matched}/{len(top_codes)} 只")
-                except Exception:
-                    pass
-                bar2.progress(0.70)
+                    from src.strategy.ai_engine_v2 import AIScorer
+                    from src.data.data_cache import DataCache as DC2
+                    from src.data.stock_pool import StockPool as SP2
+                    ai_scorer = AIScorer()
+                    ai_cache = DC2()
+                    ai_pool = SP2()
+                    bar2 = st.progress(0)
+                    txt2 = st.empty()
 
-                # 第三步: Transformer时序评分
-                txt2.text("[3/3] Transformer时序评分中...")
-                tf_scores = {}
-                try:
-                    from src.strategy.transformer_engine import StockTransformer
-                    tf_model_path = os.path.join('data', 'transformer_model.pt')
-                    if os.path.exists(tf_model_path):
-                        tf_engine = StockTransformer.load(tf_model_path)
-                        top_codes = ai_df['stock_code'].tolist() if not ai_df.empty else []
-                        tf_matched = 0
-                        for code in top_codes:
-                            try:
-                                kdf = ai_cache.load_kline(code)
-                                if kdf is not None:
-                                    ts = tf_engine.predict_single(kdf)
-                                    if ts is not None:
-                                        tf_scores[code] = ts
-                                        tf_matched += 1
-                            except Exception:
-                                pass
-                        txt2.text(f"[3/3] Transformer完成: {tf_matched}/{len(top_codes)} 只")
-                except Exception:
-                    pass
-                bar2.progress(0.9)
+                    # 0a. 更新大盘情绪（确保侧边栏显示最新日期）
+                    try:
+                        from src.data.market_sentiment import get_market_sentiment
+                        get_market_sentiment(verbose=False)
+                    except Exception:
+                        pass
+                    # 0b. 增量更新缓存，确保使用最新K线数据
+                    txt2.text("[0/3] 增量更新缓存（确保数据最新）...")
+                    with st.spinner("更新缓存中..."):
+                        from src.strategy.scanner import MarketScanner as MS2
+                        _scanner2 = MS2()
+                        _scanner2.warmup_cache(days=730)
+                    bar2.progress(0.1)
+                    # 更新后重新加载缓存
+                    ai_cache = DC2()
 
-                # 三层融合: final = 0.5 × XGBoost + 0.3 × 形态胜率 + 0.2 × Transformer
-                if not ai_df.empty:
-                    final_scores = []
-                    pat_win_rates = []
-                    pat_descs = []
-                    pat_confs = []
-                    tf_score_list = []
-                    for _, row in ai_df.iterrows():
-                        code = row['stock_code']
-                        xgb_score = row['ai_score']
-                        
-                        # 形态分
-                        pr = pattern_scores.get(code)
-                        if pr:
-                            pat_wr = pr['win_rate']
-                            pat_win_rates.append(pat_wr)
-                            pat_descs.append(pr.get('pattern_desc', ''))
-                            pat_confs.append(pr['confidence'])
-                        else:
-                            pat_wr = 52.6  # 平均胜率
-                            pat_win_rates.append(None)
-                            pat_descs.append('')
-                            pat_confs.append(None)
-                        
-                        # Transformer分
-                        ts = tf_scores.get(code)
-                        if ts is not None:
-                            tf_s = ts
-                            tf_score_list.append(tf_s)
-                        else:
-                            tf_s = 52.9  # 平均概率
-                            tf_score_list.append(None)
-                        
-                        # 超级策略融合
-                        fused = xgb_score * 0.5 + pat_wr * 0.3 + tf_s * 0.2
-                        final_scores.append(round(fused, 1))
-                    
-                    ai_df['pattern_win_rate'] = pat_win_rates
-                    ai_df['pattern_desc'] = pat_descs
-                    ai_df['pattern_confidence'] = pat_confs
-                    ai_df['transformer_score'] = tf_score_list
-                    ai_df['final_score'] = final_scores
-                    ai_df = ai_df.sort_values('final_score', ascending=False).reset_index(drop=True)
-                
-                bar2.progress(1.0)
-                txt2.empty()
-                st.session_state['ai_scores'] = ai_df
+                    def ai_prog(c, t):
+                        bar2.progress(0.1 + min(c / t * 0.35, 0.35))
+                        txt2.text(f"[1/3] XGBoost评分: {c}/{t} ({c/t*100:.0f}%)")
+                    with st.spinner("第1步: XGBoost评分全市场..."):
+                        ai_df = ai_scorer.scan_market(ai_cache, ai_pool, top_n=100, progress_callback=ai_prog)
+                    bar2.progress(0.50)
 
-                # 保存到文件
-                import json as _json2
-                output2 = {
-                    'scan_date': time.strftime('%Y-%m-%d') if 'time' in dir() else '',
-                    'scan_time': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'total_scored': len(ai_df),
-                    'pattern_matched': len(pattern_scores),
-                    'transformer_matched': len(tf_scores),
-                    'fusion': '0.5*XGBoost + 0.3*Pattern + 0.2*Transformer',
-                    'score_distribution': {
-                        'above_90': int(len(ai_df[ai_df['final_score'] >= 90])) if 'final_score' in ai_df.columns else 0,
-                        'above_80': int(len(ai_df[ai_df['final_score'] >= 80])) if 'final_score' in ai_df.columns else 0,
-                    },
-                    'top50': ai_df.head(50).to_dict(orient='records'),
-                }
-                score_out = os.path.join('data', 'ai_daily_scores.json')
-                with open(score_out, 'w', encoding='utf-8') as f:
-                    _json2.dump(output2, f, ensure_ascii=False, indent=2, default=str)
-                n_pat = len(pattern_scores)
-                n_tf = len(tf_scores)
-                st.success(f"AI超级策略扫描完成！XGB {len(ai_df)}只 + 形态 {n_pat}只 + Transformer {n_tf}只")
-            except Exception as e:
-                st.error(f"AI评分失败: {e}")
+                    # 第二步: 形态匹配
+                    txt2.text("[2/3] 形态匹配中...")
+                    pattern_scores = {}
+                    try:
+                        from src.strategy.pattern_engine import PatternEngine
+                        pe_model_path = os.path.join('data', 'pattern_engine.pkl')
+                        if os.path.exists(pe_model_path):
+                            pe = PatternEngine.load(pe_model_path)
+                            top_codes = ai_df['stock_code'].tolist() if not ai_df.empty else []
+                            matched = 0
+                            for code in top_codes:
+                                try:
+                                    kdf = ai_cache.load_kline(code)
+                                    if kdf is not None:
+                                        pr = pe.predict_single(kdf)
+                                        if pr and pr['is_valid']:
+                                            pattern_scores[code] = pr
+                                            matched += 1
+                                except Exception:
+                                    pass
+                            txt2.text(f"[2/3] 形态匹配完成: {matched}/{len(top_codes)} 只")
+                    except Exception:
+                        pass
+                    bar2.progress(0.70)
+
+                    # 第三步: Transformer时序评分
+                    txt2.text("[3/3] Transformer时序评分中...")
+                    tf_scores = {}
+                    try:
+                        from src.strategy.transformer_engine import StockTransformer
+                        tf_model_path = os.path.join('data', 'transformer_model.pt')
+                        if os.path.exists(tf_model_path):
+                            tf_engine = StockTransformer.load(tf_model_path)
+                            top_codes = ai_df['stock_code'].tolist() if not ai_df.empty else []
+                            tf_matched = 0
+                            for code in top_codes:
+                                try:
+                                    kdf = ai_cache.load_kline(code)
+                                    if kdf is not None:
+                                        ts = tf_engine.predict_single(kdf)
+                                        if ts is not None:
+                                            tf_scores[code] = ts
+                                            tf_matched += 1
+                                except Exception:
+                                    pass
+                            txt2.text(f"[3/3] Transformer完成: {tf_matched}/{len(top_codes)} 只")
+                    except Exception:
+                        pass
+                    bar2.progress(0.9)
+
+                    # 三层融合: final = 0.5 × XGBoost + 0.3 × 形态胜率 + 0.2 × Transformer
+                    if not ai_df.empty:
+                        final_scores = []
+                        pat_win_rates = []
+                        pat_descs = []
+                        pat_confs = []
+                        tf_score_list = []
+                        for _, row in ai_df.iterrows():
+                            code = row['stock_code']
+                            xgb_score = row['ai_score']
+                            # 形态分
+                            pr = pattern_scores.get(code)
+                            if pr:
+                                pat_wr = pr['win_rate']
+                                pat_win_rates.append(pat_wr)
+                                pat_descs.append(pr.get('pattern_desc', ''))
+                                pat_confs.append(pr['confidence'])
+                            else:
+                                pat_wr = 52.6
+                                pat_win_rates.append(None)
+                                pat_descs.append('')
+                                pat_confs.append(None)
+                            # Transformer分
+                            ts = tf_scores.get(code)
+                            if ts is not None:
+                                tf_s = ts
+                                tf_score_list.append(tf_s)
+                            else:
+                                tf_s = 52.9
+                                tf_score_list.append(None)
+                            # 超级策略融合
+                            fused = xgb_score * 0.5 + pat_wr * 0.3 + tf_s * 0.2
+                            final_scores.append(round(fused, 1))
+                        ai_df['pattern_win_rate'] = pat_win_rates
+                        ai_df['pattern_desc'] = pat_descs
+                        ai_df['pattern_confidence'] = pat_confs
+                        ai_df['transformer_score'] = tf_score_list
+                        ai_df['final_score'] = final_scores
+                        ai_df = ai_df.sort_values('final_score', ascending=False).reset_index(drop=True)
+                    bar2.progress(1.0)
+                    txt2.empty()
+                    st.session_state['ai_scores'] = ai_df
+                    import json as _json2
+                    output2 = {
+                        'scan_date': time.strftime('%Y-%m-%d') if 'time' in dir() else '',
+                        'scan_time': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'total_scored': len(ai_df),
+                        'pattern_matched': len(pattern_scores),
+                        'transformer_matched': len(tf_scores),
+                        'fusion': '0.5*XGBoost + 0.3*Pattern + 0.2*Transformer',
+                        'score_distribution': {
+                            'above_90': int(len(ai_df[ai_df['final_score'] >= 90])) if 'final_score' in ai_df.columns else 0,
+                            'above_80': int(len(ai_df[ai_df['final_score'] >= 80])) if 'final_score' in ai_df.columns else 0,
+                        },
+                        'top50': ai_df.head(50).to_dict(orient='records'),
+                    }
+                    score_out = os.path.join('data', 'ai_daily_scores.json')
+                    with open(score_out, 'w', encoding='utf-8') as f:
+                        _json2.dump(output2, f, ensure_ascii=False, indent=2, default=str)
+                    n_pat = len(pattern_scores)
+                    n_tf = len(tf_scores)
+                    st.success(f"AI超级策略扫描完成！XGB {len(ai_df)}只 + 形态 {n_pat}只 + Transformer {n_tf}只")
+                except Exception as e:
+                    st.error(f"AI评分失败: {e}")
 
         # 加载已有结果
         ai_df = st.session_state.get('ai_scores')
@@ -1085,7 +1099,7 @@ if page == "📡 每日信号":
                 )
             st.dataframe(
                 show_df,
-                width='stretch',
+                use_container_width=True,
                 height=min(40 * top_n_show + 40, 800),
                 column_config=col_cfg,
             )
@@ -1179,7 +1193,7 @@ elif page == "💼 我的持仓":
 
         if pos_rows:
             st.markdown("#### 📋 持仓明细")
-            st.dataframe(pd.DataFrame(pos_rows), width='stretch', hide_index=True)
+            st.dataframe(pd.DataFrame(pos_rows), use_container_width=True, hide_index=True)
             
             # 卖出提醒 (逐只展示)
             alerts_exist = any(r.get('alerts') for r in monitor_results)
@@ -1246,7 +1260,7 @@ elif page == "💼 我的持仓":
                 close_options = [f"{row['stock_code']} - {row['stock_name']} ({row['buy_date']})" for _, row in manual_df.iterrows()]
                 close_sel = st.selectbox("选择要关闭的持仓", close_options, key="close_sel")
             with close_col2:
-                if st.button("关闭此持仓", width='stretch'):
+                if st.button("关闭此持仓", use_container_width=True):
                     parts = close_sel.split(" - ")
                     c_code = parts[0]
                     c_date = parts[1].split("(")[1].rstrip(")")
@@ -1310,7 +1324,7 @@ elif page == "💼 我的持仓":
                     '收益率': f"{pnl_s}{p['profit_pct']:.1f}%",
                     '市值': f"¥{p['value']:,.0f}",
                 })
-            st.dataframe(pd.DataFrame(sim_rows), width='stretch', hide_index=True)
+            st.dataframe(pd.DataFrame(sim_rows), use_container_width=True, hide_index=True)
 
             # 仓位分布柱状
             if len(sim_equity['positions']) > 1:
@@ -1341,7 +1355,7 @@ elif page == "💼 我的持仓":
                     'price': '价格', 'shares': '数量', 'pnl': '盈亏',
                     'pnl_pct': '收益%', 'ai_score': 'AI分', 'reason': '原因'
                 })
-                st.dataframe(_disp, width='stretch', hide_index=True)
+                st.dataframe(_disp, use_container_width=True, hide_index=True)
         else:
             st.markdown("""
 <div class="signal-card" style="text-align:center;padding:40px;">
@@ -1391,7 +1405,7 @@ elif page == "💼 我的持仓":
         m_note = st.text_input("备注（可选）", value=st.session_state['_buy_note'], key="m_note", placeholder="例如：根据超跌MA60信号买入")
         st.session_state['_buy_note'] = m_note
 
-        if st.button("✅ 确认录入", type="primary", width='stretch', key="add_manual"):
+        if st.button("✅ 确认录入", type="primary", use_container_width=True, key="add_manual"):
             if m_code and m_price > 0:
                 r = account.add_manual_position(m_code.strip(), m_name, m_price, m_date.strftime('%Y-%m-%d'), m_shares, m_note)
                 if r['success']:
@@ -1438,7 +1452,7 @@ elif page == "💼 我的持仓":
             with col_s2:
                 s_date = st.date_input("卖出日期", key="s_date")
 
-            if st.button("✅ 确认卖出", type="primary", width='stretch', key="confirm_sell"):
+            if st.button("✅ 确认卖出", type="primary", use_container_width=True, key="confirm_sell"):
                 if s_price > 0:
                     parts = sell_sel.split(" - ")
                     s_code = parts[0]
@@ -1505,7 +1519,7 @@ elif page == "💼 我的持仓":
                     '卖出日': row.get('sell_date', '') if row['status'] == 'sold' else "-",
                     '状态': '已卖出' if row['status'] == 'sold' else '已关闭',
                 })
-            st.dataframe(pd.DataFrame(hist_rows), width='stretch', hide_index=True)
+            st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
         else:
             st.info("暂无历史交易记录")
 
@@ -1585,7 +1599,7 @@ elif page == "💼 我的持仓":
 
                     scan_time = action_data.get('time', 'N/A')
                     st.markdown(f'<div style="color:#7a869a;font-size:12px;margin-bottom:8px;">基于AI操作清单（{scan_time}）· 三层融合: XGBoost×0.5 + 形态×0.3 + Transformer×0.2</div>', unsafe_allow_html=True)
-                    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
                 else:
                     if held_count >= max_positions:
                         st.warning(f"当前已持仓 {held_count} 只，已达上限（{max_positions}只），建议等待卖出信号后再新增")
@@ -1674,25 +1688,60 @@ elif page == "🎮 模拟交易":
             if st.button("🤖 AI一键执行交易", type="primary", key="auto_exec", use_container_width=True):
                 auto_trader = AutoTrader(account)
                 status_container = st.status("AI自动交易引擎运行中...", expanded=True)
-                with status_container:
-                    def _on_progress(stage, msg):
-                        stage_icons = {'sell': '📤', 'scan': '🔍', 'buy': '📥', 'snapshot': '📸', 'done': '✅'}
-                        icon = stage_icons.get(stage, '⏳')
-                        st.write(f"{icon} {msg}")
+                exec_result = None
+                try:
+                    with status_container:
+                        def _on_progress(stage, msg):
+                            stage_icons = {'sell': '📤', 'scan': '🔍', 'buy': '📥', 'snapshot': '📸', 'done': '✅'}
+                            icon = stage_icons.get(stage, '⏳')
+                            st.write(f"{icon} {msg}")
 
-                    exec_result = auto_trader.execute(rescan=True, progress_callback=_on_progress)
+                        exec_result = auto_trader.execute(rescan=True, progress_callback=_on_progress)
 
-                status_container.update(label=exec_result['summary'], state="complete", expanded=False)
-                st.session_state['last_auto_result'] = exec_result
+                    status_container.update(label=exec_result['summary'], state="complete", expanded=False)
+                    st.session_state['last_auto_result'] = exec_result
+                    # 持久化到文件：执行耗时可能很长(30min+)，连接超时后 session 会丢失，刷新页面时从文件恢复
+                    _result_path = os.path.join('data', 'last_auto_result.json')
+                    try:
+                        with open(_result_path, 'w', encoding='utf-8') as _rf:
+                            json.dump({k: v for k, v in exec_result.items() if k != 'scan_result'}, _rf, ensure_ascii=False, indent=2, default=str)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    err_msg = str(e)
+                    status_container.update(label=f"执行失败: {err_msg[:80]}...", state="error", expanded=True)
+                    _err_result = {
+                        'sell_actions': [], 'buy_actions': [], 'skipped': [],
+                        'summary': f"❌ 执行异常: {err_msg}",
+                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'error': err_msg,
+                    }
+                    st.session_state['last_auto_result'] = _err_result
+                    try:
+                        with open(os.path.join('data', 'last_auto_result.json'), 'w', encoding='utf-8') as _rf:
+                            json.dump(_err_result, _rf, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+                    st.error(f"AI自动交易执行失败: {e}")
                 st.rerun()
         with col_exec2:
             auto_status = "开启" if config.AUTO_ENABLED else "关闭"
             st.markdown(f'<div class="signal-card" style="text-align:center;padding:8px;"><span style="color:#7a869a;">状态:</span> <span style="color:{"#5eba7d" if config.AUTO_ENABLED else "#e06060"};font-weight:700;">{auto_status}</span></div>', unsafe_allow_html=True)
 
-        # 显示上次执行结果
+        # 显示上次执行结果（优先 session，否则从文件恢复：执行耗时 30min+ 时连接可能超时导致 session 丢失）
         last_result = st.session_state.get('last_auto_result')
+        if not last_result:
+            try:
+                _fp = os.path.join('data', 'last_auto_result.json')
+                if os.path.exists(_fp):
+                    with open(_fp, 'r', encoding='utf-8') as _f:
+                        last_result = json.load(_f)
+            except Exception:
+                pass
         if last_result:
-            st.markdown(f"<div class='signal-card' style='padding:10px 16px;'><span style='color:#5b8def;font-weight:700;'>{last_result['summary']}</span> <span style='color:#7a869a;'>({last_result['timestamp']})</span></div>", unsafe_allow_html=True)
+            _from_file = not st.session_state.get('last_auto_result')  # 有 result 但 session 无 → 从文件恢复
+            _hint = " (从上次执行恢复)" if _from_file else ""
+            st.markdown(f"<div class='signal-card' style='padding:10px 16px;'><span style='color:#5b8def;font-weight:700;'>{last_result.get('summary', '')}</span> <span style='color:#7a869a;'>({last_result.get('timestamp', '')}){_hint}</span></div>", unsafe_allow_html=True)
 
             # 卖出操作
             if last_result.get('sell_actions'):
@@ -1743,7 +1792,7 @@ elif page == "🎮 模拟交易":
                     '收益率': f"{pnl_sign}{p['profit_pct']:.1f}%",
                     '市值': f"¥{p['value']:,.0f}",
                 })
-            st.dataframe(pd.DataFrame(ai_pos_rows), width='stretch', hide_index=True)
+            st.dataframe(pd.DataFrame(ai_pos_rows), use_container_width=True, hide_index=True)
 
             # 仓位分布
             total_stock = equity['stock_value']
@@ -1777,7 +1826,7 @@ elif page == "🎮 模拟交易":
                 'ai_score': 'AI分', 'reason': '原因'
             }
             display_df = display_df.rename(columns=col_names)
-            st.dataframe(display_df, width='stretch', hide_index=True)
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
         else:
             st.info("暂无自动交易记录。点击上方「AI一键执行交易」开始。")
 
@@ -1851,7 +1900,7 @@ elif page == "🎮 模拟交易":
                 'hold_days': '持有天', 'ai_score': 'AI分', 'sell_reason': '卖出原因',
             }
             disp_t = disp_t.rename(columns=col_map_t)
-            st.dataframe(disp_t, width='stretch', hide_index=True)
+            st.dataframe(disp_t, use_container_width=True, hide_index=True)
 
         # 退出原因分析
         exit_analysis = perf.analyze_exit_reasons()
@@ -1923,7 +1972,7 @@ elif page == "🎮 模拟交易":
                 cat = ins.get('category', '')
                 cat_colors = {
                     '评分阈值': '#5b8def', '止损精度': '#e06060', '止盈精度': '#5eba7d',
-                    '持有时间': '#f0a050', '整体评价': '#c084fc',
+                    '持有时间': '#f0a050', '卖出时机': '#38bdf8', '整体评价': '#c084fc',
                 }
                 border_c = cat_colors.get(cat, '#7a869a')
 
@@ -1957,6 +2006,84 @@ elif page == "🎮 模拟交易":
 <div style="color:#7a869a;font-size:14px;margin-top:8px;">点击上方「运行策略学习」按钮, 需要至少10笔已完成交易</div>
 </div>""", unsafe_allow_html=True)
 
+        # ---- 卖出时机分析 ----
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+        st.markdown("##### 卖出时机分析")
+        st.markdown('<span style="color:#7a869a;font-size:13px;">追踪已卖出股票的后续行情，验证卖出时机是否合理</span>', unsafe_allow_html=True)
+
+        from src.trading.performance import PerformanceAnalyzer as _PA
+        _perf = _PA()
+
+        if st.button("📊 分析卖后行情", key="run_post_sell"):
+            with st.spinner("正在拉取卖后行情数据..."):
+                _post_df = _perf.analyze_post_sell_performance()
+                _by_reason = _perf.analyze_post_sell_by_reason()
+            st.session_state['post_sell_df'] = _post_df
+            st.session_state['post_sell_by_reason'] = _by_reason
+
+        _post_sell_df = st.session_state.get('post_sell_df')
+        _post_sell_by_reason = st.session_state.get('post_sell_by_reason')
+
+        if _post_sell_df is not None and not _post_sell_df.empty:
+            _n_total = len(_post_sell_df)
+            _n_right = len(_post_sell_df[_post_sell_df['label'] == '卖对了'])
+            _n_early = len(_post_sell_df[_post_sell_df['label'] == '卖早了'])
+            _n_late = len(_post_sell_df[_post_sell_df['label'] == '卖晚了'])
+            _n_watch = _n_total - _n_right - _n_early - _n_late
+
+            _pc1, _pc2, _pc3, _pc4 = st.columns(4)
+            with _pc1:
+                st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">卖出笔数</div><div style="color:#e2e8f0;font-size:20px;font-weight:700;">{_n_total}</div></div>', unsafe_allow_html=True)
+            with _pc2:
+                st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">卖对了</div><div style="color:#5eba7d;font-size:20px;font-weight:700;">{_n_right}</div></div>', unsafe_allow_html=True)
+            with _pc3:
+                st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">卖早了</div><div style="color:#e06060;font-size:20px;font-weight:700;">{_n_early}</div></div>', unsafe_allow_html=True)
+            with _pc4:
+                st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">卖晚了</div><div style="color:#f0a050;font-size:20px;font-weight:700;">{_n_late}</div></div>', unsafe_allow_html=True)
+
+            if _post_sell_by_reason:
+                st.markdown("###### 按卖出原因分组")
+                _reason_rows = []
+                for _r in _post_sell_by_reason:
+                    _reason_rows.append({
+                        '卖出原因': _r['reason'],
+                        '笔数': _r['count'],
+                        '卖对了%': f"{_r['right_pct']}%",
+                        '卖早了%': f"{_r['early_pct']}%",
+                        '卖晚了%': f"{_r['late_pct']}%",
+                        '卖后10天最高涨幅': f"{_r['avg_post_10d_max']:+.1f}%",
+                        '卖后10天收盘涨跌': f"{_r['avg_post_10d_close']:+.1f}%",
+                    })
+                st.dataframe(pd.DataFrame(_reason_rows), use_container_width=True, hide_index=True)
+
+            st.markdown("###### 最近卖出的后续行情")
+            _display_df = _post_sell_df.sort_values('sell_date', ascending=False).head(20)
+            _disp_rows = []
+            for _, _row in _display_df.iterrows():
+                _lbl = _row['label']
+                _lbl_color = '#5eba7d' if _lbl == '卖对了' else ('#e06060' if _lbl == '卖早了' else ('#f0a050' if _lbl == '卖晚了' else '#7a869a'))
+                _disp_rows.append({
+                    '股票': f"{_row['stock_name']}({_row['stock_code']})",
+                    '卖出日': _row['sell_date'],
+                    '卖出价': f"{_row['sell_price']:.2f}",
+                    '持仓盈亏': f"{_row['pnl_pct']:+.1f}%",
+                    '卖后5天最高': f"{_row['post_5d_max_pct']:+.1f}%",
+                    '卖后10天最高': f"{_row['post_10d_max_pct']:+.1f}%",
+                    '卖后10天收盘': f"{_row['post_10d_close_pct']:+.1f}%",
+                    '判定': _lbl,
+                })
+            st.dataframe(pd.DataFrame(_disp_rows), use_container_width=True, hide_index=True)
+
+        elif _post_sell_df is not None and _post_sell_df.empty:
+            st.info("暂无已完成的卖出交易，无法分析卖后行情")
+        else:
+            st.markdown("""
+<div class="signal-card" style="text-align:center;padding:30px;">
+<div style="font-size:36px;margin-bottom:12px;">📊</div>
+<div style="color:#cbd5e1;font-size:15px;">点击上方按钮分析卖出时机</div>
+<div style="color:#7a869a;font-size:13px;margin-top:6px;">将追踪每笔卖出后 5/10/20 天的股价表现</div>
+</div>""", unsafe_allow_html=True)
+
     # ---- TAB 4: 手动买卖 ----
     with trade_tabs[3]:
         st.markdown("##### 手动模拟买卖")
@@ -1971,7 +2098,7 @@ elif page == "🎮 模拟交易":
                     st.markdown(f"#### 买入 {stock_name_t}")
                     bp = st.number_input("买入价格", value=curr_price, step=0.01, key="bp")
                     bs = st.number_input("买入股数", value=100, step=100, min_value=100, key="bs")
-                    if st.button("确认买入", type="primary", width='stretch'):
+                    if st.button("确认买入", type="primary", use_container_width=True):
                         r = account.buy(stock_code_t, stock_name_t, bp, bs)
                         st.success(r['message']) if r['success'] else st.error(r['message'])
                         if r['success']:
@@ -1980,7 +2107,7 @@ elif page == "🎮 模拟交易":
                     st.markdown(f"#### 卖出 {stock_name_t}")
                     sp = st.number_input("卖出价格", value=curr_price, step=0.01, key="sp")
                     ss = st.number_input("卖出股数", value=100, step=100, min_value=100, key="ss")
-                    if st.button("确认卖出", width='stretch'):
+                    if st.button("确认卖出", use_container_width=True):
                         r = account.sell(stock_code_t, stock_name_t, sp, ss)
                         st.success(r['message']) if r['success'] else st.error(r['message'])
                         if r['success']:
@@ -1993,7 +2120,7 @@ elif page == "🎮 模拟交易":
             pos_data = [{'代码': p['code'], '名称': p['name'], '持仓': f"{p['shares']}股",
                          '成本': f"¥{p['avg_cost']:.2f}", '现价': f"¥{p['current_price']:.2f}",
                          '盈亏': f"¥{p['profit']:,.2f}", '收益率': f"{p['profit_pct']:.2f}%"} for p in equity['positions']]
-            st.dataframe(pd.DataFrame(pos_data), width='stretch', hide_index=True)
+            st.dataframe(pd.DataFrame(pos_data), use_container_width=True, hide_index=True)
         else:
             st.info("模拟盘暂无持仓")
 
@@ -2004,7 +2131,7 @@ elif page == "🎮 模拟交易":
         if not trades.empty:
             dt = trades[['created_at', 'stock_code', 'stock_name', 'action', 'price', 'shares', 'profit']].copy()
             dt.columns = ['时间', '代码', '名称', '操作', '价格', '数量', '盈亏']
-            st.dataframe(dt, width='stretch', hide_index=True)
+            st.dataframe(dt, use_container_width=True, hide_index=True)
         else:
             st.info("暂无交易记录")
 
@@ -2054,7 +2181,7 @@ elif page == "⚙️ 系统设置":
 
         col_sync, col_mark = st.columns(2)
         with col_sync:
-            if st.button("🔄 同步股票池（申万行业分类）", type="primary", width='stretch'):
+            if st.button("🔄 同步股票池（申万行业分类）", type="primary", use_container_width=True):
                 bar = st.progress(0)
                 txt = st.empty()
                 def on_p(c, t, n):
@@ -2066,7 +2193,7 @@ elif page == "⚙️ 系统设置":
                 txt.text("完成！")
                 st.rerun()
         with col_mark:
-            if st.button("🏷️ 重新标记可交易状态", width='stretch'):
+            if st.button("🏷️ 重新标记可交易状态", use_container_width=True):
                 result = pool.mark_tradeable_status()
                 st.success(f"标记完成！可交易 {result['tradeable']} 只，排除 {result['excluded']} 只")
                 st.rerun()
@@ -2074,7 +2201,7 @@ elif page == "⚙️ 系统设置":
         boards = pool.get_industry_boards()
         if not boards.empty:
             st.dataframe(boards.rename(columns={'board_code': '代码', 'board_name': '名称', 'stock_count': '个股数'}),
-                         width='stretch', hide_index=True, height=300)
+                         use_container_width=True, hide_index=True, height=300)
 
             # 显示被排除的股票
             excluded_df = pool.get_excluded_stocks()
@@ -2083,7 +2210,7 @@ elif page == "⚙️ 系统设置":
                     st.dataframe(excluded_df.rename(columns={
                         'stock_code': '代码', 'stock_name': '名称',
                         'board_name': '行业', 'exclude_reason': '排除原因'
-                    }), width='stretch', hide_index=True, height=300)
+                    }), use_container_width=True, hide_index=True, height=300)
 
     with tab_train:
         st.markdown("#### 🧠 AI超级策略 — 模型训练")
@@ -2158,7 +2285,7 @@ elif page == "⚙️ 系统设置":
         }
         selected_layers = layer_map[train_layer_choice]
 
-        if st.button("🧠 开始训练", type="primary", width='stretch'):
+        if st.button("🧠 开始训练", type="primary", use_container_width=True):
             train_bar = st.progress(0)
             train_txt = st.empty()
             train_log = st.empty()
@@ -2326,14 +2453,14 @@ elif page == "⚙️ 系统设置":
 
         btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
         with btn_col1:
-            enable_btn = st.button("✅ 启用定时任务", type="primary", width='stretch', key="sched_enable")
+            enable_btn = st.button("✅ 启用定时任务", type="primary", use_container_width=True, key="sched_enable")
         with btn_col2:
-            disable_btn = st.button("⏸️ 停用定时任务", width='stretch', key="sched_disable")
+            disable_btn = st.button("⏸️ 停用定时任务", use_container_width=True, key="sched_disable")
         with btn_col3:
-            sync_data_btn = st.button("📥 同步数据", width='stretch', key="sched_sync_data",
+            sync_data_btn = st.button("📥 同步数据", use_container_width=True, key="sched_sync_data",
                                       help="仅更新最新K线到本地缓存，不执行AI扫描/邮件")
         with btn_col4:
-            run_now_btn = st.button("▶️ 立即执行一次", width='stretch', key="sched_run_now")
+            run_now_btn = st.button("▶️ 立即执行一次", use_container_width=True, key="sched_run_now")
 
         if enable_btn:
             with st.spinner("正在注册 Windows 计划任务..."):
@@ -2465,7 +2592,7 @@ elif page == "⚙️ 系统设置":
                 train_stocks = st.slider("训练采样股票数", 50, 500, 200, step=50)
             with c_btn2:
                 force_retrain = st.checkbox("强制重新训练", value=False)
-            if st.button("🚀 开始训练", type="primary", width='stretch', key="train_btn"):
+            if st.button("🚀 开始训练", type="primary", use_container_width=True, key="train_btn"):
                 with st.spinner("训练中..."):
                     result = train_model(max_stocks=train_stocks, force=force_retrain)
                 if 'error' in result:

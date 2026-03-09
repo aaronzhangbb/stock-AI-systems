@@ -91,7 +91,10 @@ class StrategyLearner:
         # 4. 持有时间分析
         insights.extend(self._analyze_hold_duration(trades))
 
-        # 5. 整体模式
+        # 5. 卖出时机分析
+        insights.extend(self._analyze_sell_timing())
+
+        # 6. 整体模式
         insights.extend(self._analyze_overall_patterns(trades))
 
         # 推导最优参数
@@ -264,6 +267,55 @@ class StrategyLearner:
                 'confidence': min(len(trades) / 15, 1.0),
             })
 
+        return insights
+
+    def _analyze_sell_timing(self) -> list:
+        """分析卖出时机是否合理（基于卖后行情追踪）"""
+        insights = []
+        try:
+            by_reason = self.analyzer.analyze_post_sell_by_reason()
+            if not by_reason:
+                return insights
+
+            post_df = self.analyzer.analyze_post_sell_performance()
+            if post_df.empty:
+                return insights
+
+            n_total = len(post_df)
+            n_right = len(post_df[post_df['label'] == '卖对了'])
+            n_early = len(post_df[post_df['label'] == '卖早了'])
+            n_late = len(post_df[post_df['label'] == '卖晚了'])
+            right_pct = round(n_right / n_total * 100, 1) if n_total > 0 else 0
+            early_pct = round(n_early / n_total * 100, 1) if n_total > 0 else 0
+
+            insights.append({
+                'category': '卖出时机',
+                'finding': (
+                    f'共{n_total}笔已卖出: '
+                    f'卖对了{n_right}笔({right_pct}%), '
+                    f'卖早了{n_early}笔({early_pct}%), '
+                    f'卖晚了{n_late}笔'
+                ),
+                'suggestion': '卖早比例偏高，可适当放宽卖出条件' if early_pct > 40 else (
+                    '卖出时机整体合理' if right_pct >= 50 else '需关注止损触发精度'
+                ),
+                'confidence': min(n_total / 10, 1.0),
+            })
+
+            worst_cat = max(by_reason, key=lambda x: x['early_pct']) if by_reason else None
+            if worst_cat and worst_cat['early_pct'] > 30 and worst_cat['count'] >= 2:
+                insights.append({
+                    'category': '卖出时机',
+                    'finding': (
+                        f"「{worst_cat['reason']}」触发的卖出中，"
+                        f"{worst_cat['early_pct']:.0f}%卖早了"
+                        f"（卖后10天平均最高涨{worst_cat['avg_post_10d_max']:.1f}%）"
+                    ),
+                    'suggestion': f"「{worst_cat['reason']}」的卖出条件可能偏敏感，建议结合AI评分确认",
+                    'confidence': min(worst_cat['count'] / 5, 1.0),
+                })
+        except Exception:
+            pass
         return insights
 
     def _analyze_overall_patterns(self, trades: pd.DataFrame) -> list:

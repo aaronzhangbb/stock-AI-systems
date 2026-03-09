@@ -22,7 +22,7 @@
 ### 方式二：命令行启动
 
 ```powershell
-cd "F:\project\my finance"
+cd "c:\xunqing\project\finace dock system\stock-AI-systems"
 .\venv\Scripts\Activate.ps1
 streamlit run app.py --server.port 8501 --server.headless true
 ```

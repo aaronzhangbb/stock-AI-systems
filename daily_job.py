@@ -69,6 +69,23 @@ def run_ai_super_scan():
     print("[AI扫描] === AI三层超级策略扫描开始 ===")
     t0 = time.time()
 
+    # 0a. 更新大盘情绪（界面展示用，AI策略执行时自动刷新）
+    try:
+        sentiment_data = get_market_sentiment(verbose=False)
+        if sentiment_data:
+            logger.info("大盘情绪已更新: %s分 (%s)", sentiment_data.get('sentiment_score', '-'), sentiment_data.get('sentiment_level', '-'))
+    except Exception as e:
+        logger.warning("大盘情绪更新失败(不影响扫描): %s", e)
+
+    # 0b. 增量更新K线缓存（与每日信号入口一致，确保使用最新数据）
+    try:
+        from src.strategy.scanner import MarketScanner
+        _scanner = MarketScanner()
+        warmup_result = _scanner.warmup_cache(days=730)
+        logger.info("缓存已更新: 成功%d/共%d", warmup_result.get('success', 0), warmup_result.get('total', 0))
+    except Exception as e:
+        logger.warning("缓存更新失败(将使用已有缓存): %s", e)
+
     from src.strategy.ai_engine_v2 import AIScorer
     from src.data.data_cache import DataCache
     from src.data.stock_pool import StockPool
