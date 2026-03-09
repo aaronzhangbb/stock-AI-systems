@@ -22,11 +22,12 @@ from src.trading.position_monitor import check_all_manual_positions, get_sell_al
 from src.trading.paper_trading import PaperTradingAccount
 from src.utils.email_notifier import send_email
 from src.data.market_sentiment import get_market_sentiment, format_sentiment_text
+import config
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+DATA_DIR = config.DATA_ROOT
 
 # ========== 日志配置 ==========
-LOG_DIR = os.path.join(DATA_DIR, 'logs')
+LOG_DIR = config.LOG_ROOT
 os.makedirs(LOG_DIR, exist_ok=True)
 
 log_file = os.path.join(LOG_DIR, f"daily_{datetime.now().strftime('%Y%m%d')}.log")

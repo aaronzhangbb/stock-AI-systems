@@ -28,7 +28,7 @@ CHECK_INTERVAL_MINUTES = 15   # 检查间隔（分钟）
 MAX_EMAIL_PER_STOCK = 2       # 单只股票每日最多发送邮件次数（避免轰炸）
 
 # ========== 日志 ==========
-LOG_DIR = os.path.join(os.path.dirname(__file__), 'data', 'logs')
+LOG_DIR = config.LOG_ROOT
 os.makedirs(LOG_DIR, exist_ok=True)
 
 log_file = os.path.join(LOG_DIR, f"intraday_{datetime.now().strftime('%Y%m%d')}.log")

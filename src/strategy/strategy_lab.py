@@ -24,6 +24,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+import config
 
 from src.data.data_cache import DataCache
 from src.data.stock_pool import StockPool
@@ -32,7 +33,7 @@ from src.strategy.ai_strategies import AI_STRATEGIES, compute_ai_features
 # ============================================================
 # 常量
 # ============================================================
-LAB_DB_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'strategy_lab.db')
+LAB_DB_PATH = os.path.join(config.DATA_ROOT, 'strategy_lab.db')
 
 DIMENSIONS = {
     'industry': {'name': '行业板块', 'icon': '🏭', 'desc': '按申万行业板块分组，发现不同行业的最优策略'},

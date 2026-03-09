@@ -31,7 +31,7 @@ from src.data.data_fetcher import get_realtime_price, batch_get_realtime_prices
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data')
+DATA_DIR = config.DATA_ROOT
 
 
 class AutoTrader:

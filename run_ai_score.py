@@ -10,6 +10,7 @@ import json
 
 sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, os.path.dirname(__file__))
+import config
 
 from src.data.data_cache import DataCache
 from src.data.stock_pool import StockPool
@@ -104,7 +105,7 @@ output = {
     'bottom10': df.tail(10).to_dict(orient='records'),
 }
 
-out_path = os.path.join('data', 'ai_daily_scores.json')
+out_path = os.path.join(config.DATA_ROOT, 'ai_daily_scores.json')
 with open(out_path, 'w', encoding='utf-8') as f:
     json.dump(output, f, ensure_ascii=False, indent=2, default=str)
 print(f"\n结果已保存: {out_path}")

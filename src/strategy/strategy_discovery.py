@@ -27,7 +27,7 @@ import config
 from src.strategy.ai_scoring import build_features
 
 # 模型和策略缓存路径
-MODEL_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data')
+MODEL_DIR = config.DATA_ROOT
 MODEL_PATH = os.path.join(MODEL_DIR, 'learned_model.pkl')
 RULES_PATH = os.path.join(MODEL_DIR, 'learned_rules.json')
 CACHE_DB = os.path.join(MODEL_DIR, 'stock_cache.db')

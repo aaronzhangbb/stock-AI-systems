@@ -22,7 +22,7 @@ from src.strategy.strategy_validator import validate_all_strategies, compute_com
 from src.strategy.strategy_discovery import apply_learned_rules, load_learned_rules
 
 # 扫描结果数据库
-SIGNAL_DB_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'signals.db')
+SIGNAL_DB_PATH = os.path.join(config.DATA_ROOT, 'signals.db')
 
 
 class MarketScanner:

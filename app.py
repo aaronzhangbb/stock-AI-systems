@@ -206,7 +206,7 @@ if pool_stats['board_count'] > 0:
     excluded_n = pool_stats['stock_count'] - tradeable_n
 
     # 侧边栏: 情绪简报
-    _sidebar_sentiment_path = os.path.join('data', 'market_sentiment.json')
+    _sidebar_sentiment_path = os.path.join(config.DATA_ROOT, 'market_sentiment.json')
     if os.path.exists(_sidebar_sentiment_path):
         try:
             import json as _jss
@@ -495,7 +495,7 @@ if page == "📡 每日信号":
         st.markdown("```最终评分 = 0.5 × XGBoost + 0.3 × 形态胜率 + 0.2 × Transformer```")
 
         # ---- 大盘情绪 + 板块热度展示 ----
-        _sentiment_path = os.path.join('data', 'market_sentiment.json')
+        _sentiment_path = os.path.join(config.DATA_ROOT, 'market_sentiment.json')
         if os.path.exists(_sentiment_path):
             try:
                 import json as _json_s
@@ -574,7 +574,7 @@ if page == "📡 每日信号":
 
         if ai_scan_btn:
             # 检查 XGBoost 模型是否存在（AI 扫描必需）
-            xgb_model_path = os.path.join('data', 'xgb_v2_model.json')
+            xgb_model_path = os.path.join(config.DATA_ROOT, 'xgb_v2_model.json')
             if not os.path.exists(xgb_model_path):
                 st.error(f"""
 **AI 策略扫描失败：模型文件不存在**
@@ -626,7 +626,7 @@ if page == "📡 每日信号":
                     pattern_scores = {}
                     try:
                         from src.strategy.pattern_engine import PatternEngine
-                        pe_model_path = os.path.join('data', 'pattern_engine.pkl')
+                        pe_model_path = os.path.join(config.DATA_ROOT, 'pattern_engine.pkl')
                         if os.path.exists(pe_model_path):
                             pe = PatternEngine.load(pe_model_path)
                             top_codes = ai_df['stock_code'].tolist() if not ai_df.empty else []
@@ -651,7 +651,7 @@ if page == "📡 每日信号":
                     tf_scores = {}
                     try:
                         from src.strategy.transformer_engine import StockTransformer
-                        tf_model_path = os.path.join('data', 'transformer_model.pt')
+                        tf_model_path = os.path.join(config.DATA_ROOT, 'transformer_model.pt')
                         if os.path.exists(tf_model_path):
                             tf_engine = StockTransformer.load(tf_model_path)
                             top_codes = ai_df['stock_code'].tolist() if not ai_df.empty else []
@@ -727,7 +727,7 @@ if page == "📡 每日信号":
                         },
                         'top50': ai_df.head(50).to_dict(orient='records'),
                     }
-                    score_out = os.path.join('data', 'ai_daily_scores.json')
+                    score_out = os.path.join(config.DATA_ROOT, 'ai_daily_scores.json')
                     with open(score_out, 'w', encoding='utf-8') as f:
                         _json2.dump(output2, f, ensure_ascii=False, indent=2, default=str)
                     n_pat = len(pattern_scores)
@@ -741,7 +741,7 @@ if page == "📡 每日信号":
         if ai_df is None:
             try:
                 import json as _json
-                score_path = os.path.join('data', 'ai_daily_scores.json')
+                score_path = os.path.join(config.DATA_ROOT, 'ai_daily_scores.json')
                 if os.path.exists(score_path):
                     with open(score_path, 'r', encoding='utf-8') as f:
                         cached_scores = _json.load(f)
@@ -1532,7 +1532,7 @@ elif page == "💼 我的持仓":
             # 读取最新AI操作清单
             ai_picks = []
             try:
-                action_path = os.path.join('data', 'ai_action_list.json')
+                action_path = os.path.join(config.DATA_ROOT, 'ai_action_list.json')
                 if os.path.exists(action_path):
                     with open(action_path, 'r', encoding='utf-8') as f:
                         action_data = json.load(f)
@@ -1701,7 +1701,7 @@ elif page == "🎮 模拟交易":
                     status_container.update(label=exec_result['summary'], state="complete", expanded=False)
                     st.session_state['last_auto_result'] = exec_result
                     # 持久化到文件：执行耗时可能很长(30min+)，连接超时后 session 会丢失，刷新页面时从文件恢复
-                    _result_path = os.path.join('data', 'last_auto_result.json')
+                    _result_path = os.path.join(config.DATA_ROOT, 'last_auto_result.json')
                     try:
                         with open(_result_path, 'w', encoding='utf-8') as _rf:
                             json.dump({k: v for k, v in exec_result.items() if k != 'scan_result'}, _rf, ensure_ascii=False, indent=2, default=str)
@@ -1718,7 +1718,7 @@ elif page == "🎮 模拟交易":
                     }
                     st.session_state['last_auto_result'] = _err_result
                     try:
-                        with open(os.path.join('data', 'last_auto_result.json'), 'w', encoding='utf-8') as _rf:
+                        with open(os.path.join(config.DATA_ROOT, 'last_auto_result.json'), 'w', encoding='utf-8') as _rf:
                             json.dump(_err_result, _rf, ensure_ascii=False, indent=2)
                     except Exception:
                         pass
@@ -1732,7 +1732,7 @@ elif page == "🎮 模拟交易":
         last_result = st.session_state.get('last_auto_result')
         if not last_result:
             try:
-                _fp = os.path.join('data', 'last_auto_result.json')
+                _fp = os.path.join(config.DATA_ROOT, 'last_auto_result.json')
                 if os.path.exists(_fp):
                     with open(_fp, 'r', encoding='utf-8') as _f:
                         last_result = json.load(_f)
@@ -2225,7 +2225,7 @@ elif page == "⚙️ 系统设置":
         }
         mc1, mc2, mc3 = st.columns(3)
         for col_ui, (name, (fname, desc)) in zip([mc1, mc2, mc3], model_files.items()):
-            fpath = os.path.join('data', fname)
+            fpath = os.path.join(config.DATA_ROOT, fname)
             with col_ui:
                 if os.path.exists(fpath):
                     mtime = os.path.getmtime(fpath)
@@ -2251,7 +2251,7 @@ elif page == "⚙️ 系统设置":
 </div>""", unsafe_allow_html=True)
 
         # 上次训练报告
-        report_path = os.path.join('data', 'retrain_report.json')
+        report_path = os.path.join(config.DATA_ROOT, 'retrain_report.json')
         if os.path.exists(report_path):
             with open(report_path, 'r', encoding='utf-8') as f:
                 last_report = json.load(f)
@@ -2327,7 +2327,7 @@ elif page == "⚙️ 系统设置":
             # 保存报告
             results['train_date'] = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
             results['layers_trained'] = selected_layers
-            rpt_path = os.path.join('data', 'retrain_report.json')
+            rpt_path = os.path.join(config.DATA_ROOT, 'retrain_report.json')
             with open(rpt_path, 'w', encoding='utf-8') as f:
                 json.dump(results, f, ensure_ascii=False, indent=2, default=str)
 
@@ -2341,8 +2341,8 @@ elif page == "⚙️ 系统设置":
         import subprocess as _sp
 
         # 读取调度器状态
-        scheduler_config_path = os.path.join('data', 'scheduler_config.json')
-        scheduler_status_path = os.path.join('data', 'scheduler_status.json')
+        scheduler_config_path = os.path.join(config.DATA_ROOT, 'scheduler_config.json')
+        scheduler_status_path = os.path.join(config.DATA_ROOT, 'scheduler_status.json')
 
         # 先刷新状态
         try:
@@ -2527,7 +2527,7 @@ elif page == "⚙️ 系统设置":
 
         # 运行日志
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-        log_path = os.path.join('data', 'scheduler_log.txt')
+        log_path = os.path.join(config.DATA_ROOT, 'scheduler_log.txt')
         if os.path.exists(log_path):
             with st.expander("📋 运行日志（最近20条）", expanded=False):
                 try:

@@ -32,8 +32,9 @@ from datetime import datetime
 
 sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, os.path.dirname(__file__))
+import config
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+DATA_DIR = config.DATA_ROOT
 
 
 def backup_model(filepath, label):

@@ -1,11 +1,10 @@
 # Local secrets
 .env
 .env.local
+.env.*
+!.env.example
 
 # Python cache
-__pycache__/
-*.pyc
-# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -27,15 +26,8 @@ env/
 *.swo
 *~
 
-# Data files (too large for git)
-data/*.db
-data/*.pkl
-data/*.json
-data/*.xlsx
-
-# Model files (large)
-data/*.model
-data/*.pt
+# Data directory (all runtime state, caches, models, logs)
+data/
 
 # Cursor IDE
 .cursor/
@@ -51,3 +43,4 @@ desktop.ini
 # Temporary files
 *.tmp
 *.bak
+_check_today.py

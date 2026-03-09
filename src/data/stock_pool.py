@@ -14,9 +14,10 @@ import time
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+import config
 
 # 数据库路径
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'stock_pool.db')
+DB_PATH = os.path.join(config.DATA_ROOT, 'stock_pool.db')
 
 
 class StockPool:

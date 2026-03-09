@@ -25,6 +25,7 @@ import pandas as pd
 from typing import Optional, Dict, List, Tuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+import config
 
 # ============================================================
 # 配置
@@ -35,7 +36,7 @@ TARGET_RETURN = 0.03  # 目标收益: 3%
 N_CLUSTERS = 200      # 聚类数量
 MIN_SAMPLES = 50      # 每个聚类最少样本数(否则合并)
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data')
+DATA_DIR = config.DATA_ROOT
 
 
 # ============================================================

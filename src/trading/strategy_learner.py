@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import config
 from src.trading.performance import PerformanceAnalyzer
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data')
+DATA_DIR = config.DATA_ROOT
 
 
 class StrategyLearner:

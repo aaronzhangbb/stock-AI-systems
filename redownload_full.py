@@ -13,12 +13,13 @@ import time
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(__file__))
+import config
 
 from src.data.data_cache import DataCache
 from src.data.data_fetcher import _fetch_from_api, _get_cache
 from src.data.stock_pool import StockPool
 
-CACHE_DB = os.path.join(os.path.dirname(__file__), 'data', 'stock_cache.db')
+CACHE_DB = os.path.join(config.DATA_ROOT, 'stock_cache.db')
 MIN_RECORDS = 600  # 少于这个数认为数据不足（3年≈730个交易日）
 
 # 北交所跳过

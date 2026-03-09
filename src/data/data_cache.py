@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import config
 
 # 缓存数据库路径（项目根目录/data/stock_cache.db）
-CACHE_DB_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'stock_cache.db')
+CACHE_DB_PATH = os.path.join(config.DATA_ROOT, 'stock_cache.db')
 
 
 class DataCache:

@@ -23,8 +23,9 @@ import pandas as pd
 from typing import Optional, Dict, List, Tuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+import config
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data')
+DATA_DIR = config.DATA_ROOT
 
 # 序列长度与特征
 SEQ_LEN = 60       # 过去60个交易日

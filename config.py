@@ -1,5 +1,9 @@
 """
 A股量化交易辅助系统 - 全局配置文件
+
+配置优先级: .env 环境变量 > 本文件默认值
+机器差异（性能参数、开关、路径）通过 .env 覆盖，不要直接修改本文件。
+参见 DEV_RULES.md 和 .env.example
 """
 
 import os
@@ -24,43 +28,69 @@ def _load_dotenv(dotenv_path: str = ".env"):
                 if key and key not in os.environ:
                     os.environ[key] = value
     except Exception:
-        # 读取失败时保持默认配置，不影响主流程
         pass
 
 
 _load_dotenv()
 
-# ==================== 策略参数 ====================
-# 双均线策略
-MA_SHORT = 5        # 短期均线天数
-MA_LONG = 20        # 长期均线天数
 
-# RSI 过滤参数
-RSI_PERIOD = 14     # RSI 计算周期
-RSI_OVERBOUGHT = 80  # 超买阈值（高于此值不买入）
-RSI_OVERSOLD = 20    # 超卖阈值（低于此值不卖出）
+def _env_bool(key: str, default: str = "true") -> bool:
+    return os.getenv(key, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(key: str, default: int = 0) -> int:
+    try:
+        return int(os.getenv(key, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+
+def _env_float(key: str, default: float = 0.0) -> float:
+    try:
+        return float(os.getenv(key, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+
+# ==================== 运行实例标识 ====================
+INSTANCE_NAME = os.getenv("INSTANCE_NAME", "default")
+
+# ==================== 数据根目录（核心：所有数据路径的基础） ====================
+DATA_ROOT = os.getenv("DATA_ROOT", "data")
+os.makedirs(DATA_ROOT, exist_ok=True)
+
+LOG_ROOT = os.path.join(DATA_ROOT, "logs")
+os.makedirs(LOG_ROOT, exist_ok=True)
+
+# ==================== 策略参数 ====================
+MA_SHORT = 5
+MA_LONG = 20
+
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 80
+RSI_OVERSOLD = 20
 
 # ==================== 模拟账户参数 ====================
-INITIAL_CAPITAL = 1000000.0  # 初始资金（100万元，供AI虚拟盘50只股票用）
-COMMISSION_RATE = 0.0003     # 佣金费率（万三）
-MIN_COMMISSION = 5.0         # 最低佣金（5元）
-STAMP_TAX_RATE = 0.001       # 印花税（千一，仅卖出时收取）
-POSITION_RATIO = 0.3         # 单次买入仓位比例（30%）
+INITIAL_CAPITAL = _env_float("INITIAL_CAPITAL", 1000000.0)
+COMMISSION_RATE = 0.0003
+MIN_COMMISSION = 5.0
+STAMP_TAX_RATE = 0.001
+POSITION_RATIO = 0.3
 
 # ==================== 数据参数 ====================
-DEFAULT_PERIOD = "daily"     # 默认K线周期
-DEFAULT_ADJUST = "qfq"       # 默认复权方式：前复权
-HISTORY_DAYS = 365           # 默认拉取历史天数
+DEFAULT_PERIOD = "daily"
+DEFAULT_ADJUST = "qfq"
+HISTORY_DAYS = _env_int("HISTORY_DAYS", 365)
 
 # ==================== 提醒参数 ====================
-ENABLE_NOTIFICATION = True   # 是否启用桌面弹窗提醒
+ENABLE_NOTIFICATION = _env_bool("ENABLE_NOTIFICATION", "true")
 
 # ==================== 邮件通知参数 ====================
-EMAIL_ENABLE = os.getenv("EMAIL_ENABLE", "true").strip().lower() in ("1", "true", "yes", "on")
+EMAIL_ENABLE = _env_bool("EMAIL_ENABLE", "true")
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.qq.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
+SMTP_PORT = _env_int("SMTP_PORT", 465)
 SMTP_USER = os.getenv("SMTP_USER", "360928477@qq.com")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")  # 从环境变量读取，避免明文凭据入库
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 _email_to_env = os.getenv("EMAIL_TO", "")
 if _email_to_env.strip():
     EMAIL_TO = [x.strip() for x in _email_to_env.split(",") if x.strip()]
@@ -68,47 +98,46 @@ else:
     EMAIL_TO = ["360928477@qq.com"]
 
 # ==================== 大模型参数（阿里云百炼） ====================
-BAILIAN_API_KEY = ""  # 建议通过环境变量 BAILIAN_API_KEY 配置
+BAILIAN_API_KEY = os.getenv("BAILIAN_API_KEY", "")
 BAILIAN_API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
 BAILIAN_MODEL = "qwen-plus"
 BAILIAN_TIMEOUT = 20
 
 # ==================== AI策略参数 ====================
-AI_PREDICT_HORIZON = 5        # 预测未来N天涨跌
+AI_PREDICT_HORIZON = 5
 AI_MIN_TRAIN_SAMPLES = 80
 
 # ==================== 风控参数 ====================
-# 注意: 以下固定百分比仅作为「降级保底」使用
-# AI策略的止盈止损/仓位由 ai_engine_v2._compute_trade_advice() 动态计算:
-#   - 止损: ATR × 动态倍数(1.0~3.5), 结合趋势强度/波动率/支撑位
-#   - 止盈: 多目标体系(T1/T2/T3), ATR驱动 + 阻力位自适应
-#   - 仓位: 改进Kelly公式 × 波动率缩放 × AI置信度 (5%~35%)
-#   - 持有: ATR标准化目标距离 + 动量加速度推算
-STOP_LOSS_PCT = 0.08          # 降级止损 8% (ATR计算失败时使用)
-TAKE_PROFIT_PCT = 0.20        # 降级止盈 20% (ATR计算失败时使用)
-TRAILING_STOP_PCT = 0.10      # 降级追踪止损 10% (ATR计算失败时使用)
+# 以下固定百分比仅作为「降级保底」使用
+# AI策略的止盈止损/仓位由 ai_engine_v2._compute_trade_advice() 动态计算
+STOP_LOSS_PCT = 0.08
+TAKE_PROFIT_PCT = 0.20
+TRAILING_STOP_PCT = 0.10
 
-# Kelly仓位管理参数
-KELLY_FRACTION = 0.5          # 使用半Kelly (保守系数)
-TARGET_PORTFOLIO_VOL = 0.15   # 目标组合年化波动率 15%
-MAX_SINGLE_POSITION = 0.35    # 单只最大仓位 35%
-MIN_SINGLE_POSITION = 0.05    # 单只最小仓位 5%
+KELLY_FRACTION = 0.5
+TARGET_PORTFOLIO_VOL = 0.15
+MAX_SINGLE_POSITION = 0.35
+MIN_SINGLE_POSITION = 0.05
 
 # ==================== 推荐参数 ====================
-RECOMMEND_TOP_N = 20          # 每日推荐股票数
-RECOMMEND_MIN_SCORE = 55      # 最低推荐评分
-STRATEGY_HOLD_DAYS = 5        # 策略验证持有天数
+RECOMMEND_TOP_N = 20
+RECOMMEND_MIN_SCORE = 55
+STRATEGY_HOLD_DAYS = 5
 
-# ==================== AI自动交易参数 ====================
-AUTO_SCORE_THRESHOLD = 75     # 自动买入最低AI评分 (三层融合final_score的合理门槛)
-AUTO_MAX_POSITIONS = 50       # 最大同时持仓数 (买入所有推荐)
-AUTO_SELL_URGENCY = 1         # 卖出紧急度阈值 (1=建议卖出+立即卖出, 2=仅立即卖出)
-AUTO_USE_KELLY_SIZE = True    # 使用Kelly仓位 (False则用固定POSITION_RATIO)
-AUTO_ENABLED = True           # 自动交易总开关
-AI_SELL_SCORE_DROP = 15       # 技术面卖出信号需 AI 评分下降超过此值才确认卖出
+# ==================== AI自动交易参数（可通过 .env 覆盖） ====================
+AUTO_SCORE_THRESHOLD = _env_int("AUTO_SCORE_THRESHOLD", 75)
+AUTO_MAX_POSITIONS = _env_int("AUTO_MAX_POSITIONS", 50)
+AUTO_SELL_URGENCY = _env_int("AUTO_SELL_URGENCY", 1)
+AUTO_USE_KELLY_SIZE = _env_bool("AUTO_USE_KELLY_SIZE", "true")
+AUTO_ENABLED = _env_bool("AUTO_ENABLED", "true")
+AI_SELL_SCORE_DROP = _env_int("AI_SELL_SCORE_DROP", 15)
 
-# ==================== 数据库路径 ====================
-DB_PATH = "data/trading.db"  # SQLite 数据库路径
+# ==================== 性能参数（低配机/高配机/服务器差异化） ====================
+SCAN_LIMIT = _env_int("SCAN_LIMIT", 0)                        # 扫描股票上限, 0=全量
+ENABLE_HEAVY_MODEL = _env_bool("ENABLE_HEAVY_MODEL", "true")   # 是否启用重模型 (Transformer等)
+
+# ==================== 数据库路径（基于 DATA_ROOT） ====================
+DB_PATH = os.path.join(DATA_ROOT, "trading.db")
 
 # ==================== 常用股票池（可自定义）====================
 WATCHLIST = {

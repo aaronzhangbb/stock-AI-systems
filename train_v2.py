@@ -16,6 +16,7 @@ import pickle
 
 sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, os.path.dirname(__file__))
+import config
 
 import numpy as np
 import pandas as pd
@@ -322,7 +323,7 @@ except Exception as e:
 print("\n[阶段8] 保存模型和结果...")
 
 # 保存模型
-model_path = os.path.join('data', 'xgb_v2_model.json')
+model_path = os.path.join(config.DATA_ROOT, 'xgb_v2_model.json')
 model.save_model(model_path)
 print(f"  模型已保存: {model_path}")
 
@@ -367,7 +368,7 @@ if shap_df is not None:
         for i, (_, row) in enumerate(shap_df.head(20).iterrows())
     ]
 
-result_path = os.path.join('data', 'xgb_v2_result.json')
+result_path = os.path.join(config.DATA_ROOT, 'xgb_v2_result.json')
 with open(result_path, 'w', encoding='utf-8') as f:
     json.dump(result, f, ensure_ascii=False, indent=2, default=str)
 print(f"  结果已保存: {result_path}")

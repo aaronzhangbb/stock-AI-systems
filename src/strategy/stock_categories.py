@@ -17,9 +17,10 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+import config
 
-POOL_DB = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'stock_pool.db')
-CACHE_DB = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'stock_cache.db')
+POOL_DB = os.path.join(config.DATA_ROOT, 'stock_pool.db')
+CACHE_DB = os.path.join(config.DATA_ROOT, 'stock_cache.db')
 
 # ============================================================
 # 申万行业 → 大类风格映射
