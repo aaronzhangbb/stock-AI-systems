@@ -1,209 +1,240 @@
-# A股量化交易辅助系统 - 配置与运行文档
-
-## 1. 环境信息
-
-| 项目 | 值 |
-|:---|:---|
-| 项目目录 | `F:\project\my finance` |
-| Python 版本 | 3.12.10 |
-| 虚拟环境 | `.\venv\` |
-| 数据缓存 | `.\data\stock_cache.db` |
-| 模拟交易数据库 | `.\data\trading.db` |
-| Skills 目录 | `C:\Users\Administrator\.claude\skills` |
+# A股量化交易辅助系统 - 搭建与运行指南
 
 ---
 
-## 2. 启动项目
+## 1. 新电脑初始化（从零开始）
 
-### 方式一：双击启动（推荐）
-
-直接双击项目根目录下的 `start.bat`。
-
-### 方式二：命令行启动
+### 第一步：克隆仓库
 
 ```powershell
-cd "c:\xunqing\project\finace dock system\stock-AI-systems"
+# 如果需要代理访问 GitHub（v2rayN HTTP 端口）
+$env:HTTPS_PROXY="http://127.0.0.1:10809"
+
+# 克隆到你想放的目录
+cd "你的项目父目录"
+git clone https://github.com/aaronzhangbb/stock-AI-systems.git
+cd stock-AI-systems
+```
+
+### 第二步：创建 Python 虚拟环境
+
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+
+# 安装依赖（用阿里云镜像加速）
+$env:PYTHONUTF8=1
+pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+```
+
+### 第三步：创建本机配置文件
+
+```powershell
+# 复制模板
+Copy-Item .env.example .env
+```
+
+然后用编辑器打开 `.env`，根据这台电脑的情况修改：
+
+**低配电脑推荐配置：**
+```env
+INSTANCE_NAME=dev-low
+AUTO_ENABLED=false
+SCAN_LIMIT=500
+ENABLE_HEAVY_MODEL=false
+```
+
+**高配电脑推荐配置：**
+```env
+INSTANCE_NAME=dev-high
+AUTO_ENABLED=true
+SCAN_LIMIT=0
+ENABLE_HEAVY_MODEL=true
+```
+
+**云服务器推荐配置：**
+```env
+INSTANCE_NAME=server-prod
+AUTO_ENABLED=true
+SCAN_LIMIT=0
+ENABLE_HEAVY_MODEL=true
+```
+
+### 第四步：启动
+
+```powershell
 .\venv\Scripts\Activate.ps1
 streamlit run app.py --server.port 8501 --server.headless true
 ```
 
-启动后浏览器访问：**http://localhost:8501**
+浏览器访问：**http://localhost:8501**
 
-停止服务：终端按 `Ctrl+C`
+> 也可以直接双击 `start.bat` 启动。
 
 ---
 
-## 3. 依赖安装
+## 2. 日常开发（已有环境）
 
-如果重新安装或新增依赖，使用阿里云镜像源：
+### 切换到这台电脑继续开发
 
 ```powershell
-cd "F:\project\my finance"
+cd "你的项目目录\stock-AI-systems"
 .\venv\Scripts\Activate.ps1
-pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+
+# 拉取最新代码
+git fetch
+git checkout 你正在开发的分支
+git pull
+```
+
+### 离开这台电脑前
+
+```powershell
+git add .
+git commit -m "feat: 进度描述"
+
+# 推送到远程（需代理时加上）
+$env:HTTPS_PROXY="http://127.0.0.1:10809"
+git push
+```
+
+### 新功能开发
+
+```powershell
+git checkout master
+git pull origin master
+git checkout -b feature/新功能名字
+
+# ... 开发 ...
+
+git add .
+git commit -m "feat: 功能描述"
+git push -u origin feature/新功能名字
 ```
 
 ---
 
-## 4. 项目结构
+## 3. 项目结构
 
 ```
-F:\project\my finance\
+stock-AI-systems/
 ├── app.py                    # Streamlit 主界面入口
-├── config.py                 # 全局配置（策略参数、费率、股票池）
+├── config.py                 # 全局配置（优先读 .env 环境变量）
+├── daily_job.py              # 每日收盘任务（缓存更新 + AI扫描 + 邮件推送）
+├── retrain_all.py            # 三层模型重训练
 ├── start.bat                 # 一键启动脚本
 ├── requirements.txt          # Python 依赖清单
-├── AGENTS.md                 # Claude Skills 注册清单
+├── DEV_RULES.md              # 多机开发与部署规范
 ├── SETUP.md                  # 本文档
 │
+├── .env.example              # 环境变量模板（提交 Git）
+├── .env                      # 本机实际配置（不提交 Git）
+│
 ├── src/                      # 源代码
-│   ├── data/
-│   │   ├── data_fetcher.py   # 数据获取（AkShare + 本地缓存）
-│   │   └── data_cache.py     # SQLite 缓存管理
-│   ├── strategy/
-│   │   └── strategy.py       # 策略引擎（双均线 + RSI）
-│   ├── backtest/
-│   │   └── backtester.py     # 回测系统
-│   ├── trading/
-│   │   └── paper_trading.py  # 模拟交易账户
-│   └── utils/
-│       └── notifier.py       # Windows 桌面弹窗通知
+│   ├── data/                 # 数据获取、缓存、情绪、板块
+│   ├── strategy/             # AI策略、扫描、模式识别
+│   ├── trading/              # 模拟交易、持仓监控、绩效、策略学习
+│   ├── backtest/             # 回测系统
+│   └── utils/                # 通知等工具
 │
-├── data/                     # 数据目录
-│   ├── stock_cache.db        # 历史行情缓存（自动生成）
-│   └── trading.db            # 模拟交易记录（自动生成）
+├── data/                     # 运行数据目录（不提交 Git，自动生成）
+│   ├── trading.db            # 模拟交易数据库
+│   ├── stock_cache.db        # K线缓存
+│   ├── stock_pool.db         # 股票池
+│   ├── ai_daily_scores.json  # AI评分
+│   ├── market_sentiment.json # 市场情绪
+│   ├── xgb_v2_model.json     # XGBoost 模型
+│   ├── pattern_engine.pkl    # 形态识别模型
+│   ├── transformer_model.pt  # Transformer 模型
+│   └── logs/                 # 运行日志
 │
-├── venv/                     # Python 虚拟环境
-└── logs/                     # 日志目录
+└── venv/                     # Python 虚拟环境（不提交 Git）
 ```
 
 ---
 
-## 5. 核心配置项（config.py）
+## 4. 配置说明
 
-### 策略参数
+### 配置层级
 
-| 参数 | 默认值 | 说明 |
+| 优先级 | 文件 | 提交 Git | 说明 |
+|:---|:---|:---|:---|
+| 高 | `.env` | 否 | 本机实际配置，每台电脑独立维护 |
+| 低 | `config.py` | 是 | 项目默认值，所有参数的 fallback |
+| 参考 | `.env.example` | 是 | 模板，列出所有可配置项 |
+
+### 关键可配置参数
+
+| 环境变量 | 默认值 | 说明 |
 |:---|:---|:---|
-| `MA_SHORT` | 5 | 短期均线天数 |
-| `MA_LONG` | 20 | 长期均线天数 |
-| `RSI_PERIOD` | 14 | RSI 计算周期 |
-| `RSI_OVERBOUGHT` | 80 | 超买阈值（高于此不买入） |
-| `RSI_OVERSOLD` | 20 | 超卖阈值（低于此不卖出） |
-
-### 交易参数
-
-| 参数 | 默认值 | 说明 |
-|:---|:---|:---|
-| `INITIAL_CAPITAL` | 100,000 | 模拟盘初始资金（元） |
-| `COMMISSION_RATE` | 0.0003 | 佣金费率（万三） |
-| `MIN_COMMISSION` | 5.0 | 最低佣金（元） |
-| `STAMP_TAX_RATE` | 0.001 | 印花税（千一，仅卖出） |
-| `POSITION_RATIO` | 0.3 | 单次买入仓位比例（30%） |
-
-### AI策略与风控参数
-
-| 参数 | 默认值 | 说明 |
-|:---|:---|:---|
-| `AI_PREDICT_HORIZON` | 5 | 预测未来N天涨跌 |
-| `AI_MIN_TRAIN_SAMPLES` | 80 | 最小训练样本数 |
-| `STOP_LOSS_PCT` | 0.08 | 止损比例 |
-| `TAKE_PROFIT_PCT` | 0.20 | 止盈比例 |
-| `TRAILING_STOP_PCT` | 0.10 | 追踪止损比例 |
-
-### 邮件通知参数
-
-推荐通过项目根目录 `.env` 文件配置（避免把授权码写入代码）：
-
-```env
-EMAIL_ENABLE=true
-SMTP_HOST=smtp.qq.com
-SMTP_PORT=465
-SMTP_USER=你的QQ邮箱
-SMTP_PASSWORD=你的QQ邮箱授权码
-EMAIL_TO=收件人1@qq.com,收件人2@qq.com
-```
-
-| 参数 | 默认值 | 说明 |
-|:---|:---|:---|
-| `EMAIL_ENABLE` | True | 是否启用邮件通知 |
-| `SMTP_HOST` | smtp.qq.com | SMTP服务器 |
-| `SMTP_PORT` | 465 | SMTP端口 |
-| `SMTP_USER` | 你的QQ邮箱 | 发件邮箱 |
+| `INSTANCE_NAME` | default | 运行实例标识 |
+| `DATA_ROOT` | data | 数据根目录 |
+| `AUTO_ENABLED` | true | 自动交易总开关 |
+| `AUTO_SCORE_THRESHOLD` | 75 | 自动买入最低AI评分 |
+| `AUTO_MAX_POSITIONS` | 50 | 最大同时持仓数 |
+| `AI_SELL_SCORE_DROP` | 15 | AI评分衰减卖出确认阈值 |
+| `SCAN_LIMIT` | 0 | 扫描股票上限（0=全量） |
+| `ENABLE_HEAVY_MODEL` | true | 是否启用重模型(Transformer等) |
+| `HISTORY_DAYS` | 365 | 历史数据拉取天数 |
+| `INITIAL_CAPITAL` | 1000000 | 模拟盘初始资金(元) |
+| `EMAIL_ENABLE` | true | 是否启用邮件通知 |
 | `SMTP_PASSWORD` | 空 | QQ邮箱授权码 |
-| `EMAIL_TO` | 收件人列表 | 邮件接收地址 |
-
-### 大模型参数（阿里云百炼）
-
-| 参数 | 默认值 | 说明 |
-|:---|:---|:---|
-| `BAILIAN_API_KEY` | 空 | 百炼API Key（可用环境变量 `BAILIAN_API_KEY`） |
-| `BAILIAN_API_URL` | DashScope URL | 百炼API地址 |
-| `BAILIAN_MODEL` | qwen-plus | 默认模型 |
-| `BAILIAN_TIMEOUT` | 20 | 超时时间（秒） |
+| `BAILIAN_API_KEY` | 空 | 百炼大模型API Key |
 
 ### 股票观察池
 
-在 `config.py` 的 `WATCHLIST` 字典中添加或删除：
-
-```python
-WATCHLIST = {
-    "600519": "贵州茅台",
-    "000858": "五粮液",
-    "601318": "中国平安",
-    # 添加新股票...
-}
-```
+在 `config.py` 的 `WATCHLIST` 字典中添加或删除。
 
 ---
 
-## 6. 每日收盘任务（自动推送）
-
-项目提供 `daily_job.py`，用于：
-1) 增量更新缓存  
-2) 全市场扫描  
-3) 邮件推送  
-
-可使用 Windows 任务计划程序每日收盘后执行：
+## 5. 每日收盘任务
 
 ```powershell
-cd "F:\project\my finance"
 .\venv\Scripts\Activate.ps1
 python daily_job.py
 ```
 
----
+功能：增量更新缓存 → AI三层策略扫描 → 生成推荐 → 邮件推送
 
-## 7. Git 代理配置
-
-系统 git 原有代理 `127.0.0.1:17890`，已清除。如需恢复：
-
-```powershell
-# 设置代理
-git config --global http.proxy http://127.0.0.1:17890
-git config --global https.proxy http://127.0.0.1:17890
-
-# 清除代理
-git config --global --unset http.proxy
-git config --global --unset https.proxy
-```
+可配合 Windows 任务计划程序每日自动执行。
 
 ---
 
-## 8. 常见问题
+## 6. 重要提醒
+
+### 两台电脑的运行数据是独立的
+
+`data/` 目录不进 Git。所以：
+- A 电脑的模拟盘持仓、AI评分、缓存
+- B 电脑的模拟盘持仓、AI评分、缓存
+
+是**两套独立的实验环境**，互不影响。
+
+### 不要直接改 config.py 来适配本机
+
+如果某个参数在这台电脑上需要不同的值（比如低配机要关闭重模型），
+应该在 `.env` 里设置，不要直接改 `config.py`。
+
+详细规范参见 `DEV_RULES.md`。
+
+---
+
+## 7. 常见问题
 
 ### Q: 启动后浏览器没有自动打开？
-
-手动访问 http://localhost:8501
+手动访问 http://localhost:8501。如果端口被占用，换一个：`--server.port 8502`
 
 ### Q: 数据获取失败？
-
 检查网络连接。AkShare 从东方财富获取数据，需要能访问外网。
 
 ### Q: 如何清除缓存数据？
-
 删除 `data/stock_cache.db` 文件，下次启动时会自动重新创建。
 
 ### Q: 如何重置模拟账户？
+在界面「模拟交易」页面点击「重置模拟账户」，或删除 `data/trading.db`。
 
-在系统界面「模拟交易」页面点击「重置模拟账户」按钮，或删除 `data/trading.db` 文件。
+### Q: pip install 报编码错误？
+在命令前加 `$env:PYTHONUTF8=1`。
+
+### Q: git push 超时？
+设置代理：`$env:HTTPS_PROXY="http://127.0.0.1:10809"`（v2rayN HTTP 端口）。
