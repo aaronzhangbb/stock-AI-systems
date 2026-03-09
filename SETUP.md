@@ -73,7 +73,46 @@ streamlit run app.py --server.port 8501 --server.headless true
 
 ---
 
-## 2. 日常开发（已有环境）
+## 2. 已有项目的电脑同步最新改造
+
+如果这台电脑上已经有项目（之前 clone 过），只需要同步代码并配置 `.env`：
+
+```powershell
+# 进入项目目录
+cd "你的项目目录\stock-AI-systems"
+
+# 如果需要代理
+$env:HTTPS_PROXY="http://127.0.0.1:10809"
+
+# 拉取最新代码（切到最新的功能分支）
+git fetch
+git checkout feature/config-refactor
+git pull
+
+# 创建本机配置文件（只需做一次，以后不用再做）
+Copy-Item .env.example .env
+```
+
+然后编辑 `.env`，按这台电脑的性能设置参数（参见上面第三步的推荐配置）。
+
+如果虚拟环境依赖有更新：
+
+```powershell
+.\venv\Scripts\Activate.ps1
+$env:PYTHONUTF8=1
+pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+```
+
+完成后直接启动即可：
+
+```powershell
+.\venv\Scripts\Activate.ps1
+streamlit run app.py --server.port 8501 --server.headless true
+```
+
+---
+
+## 3. 日常开发（已有环境）
 
 ### 切换到这台电脑继续开发
 
@@ -114,7 +153,7 @@ git push -u origin feature/新功能名字
 
 ---
 
-## 3. 项目结构
+## 4. 项目结构
 
 ```
 stock-AI-systems/
@@ -153,7 +192,7 @@ stock-AI-systems/
 
 ---
 
-## 4. 配置说明
+## 5. 配置说明
 
 ### 配置层级
 
@@ -187,7 +226,7 @@ stock-AI-systems/
 
 ---
 
-## 5. 每日收盘任务
+## 6. 每日收盘任务
 
 ```powershell
 .\venv\Scripts\Activate.ps1
@@ -200,7 +239,7 @@ python daily_job.py
 
 ---
 
-## 6. 重要提醒
+## 7. 重要提醒
 
 ### 两台电脑的运行数据是独立的
 
@@ -219,7 +258,7 @@ python daily_job.py
 
 ---
 
-## 7. 常见问题
+## 8. 常见问题
 
 ### Q: 启动后浏览器没有自动打开？
 手动访问 http://localhost:8501。如果端口被占用，换一个：`--server.port 8502`
