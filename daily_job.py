@@ -205,6 +205,7 @@ def run_ai_super_scan():
             'above_90': int(len(ai_df[ai_df['final_score'] >= 90])),
             'above_80': int(len(ai_df[ai_df['final_score'] >= 80])),
         },
+        'all_scores': ai_df.to_dict(orient='records'),
         'top50': ai_df.head(50).to_dict(orient='records'),
     }
     score_path = os.path.join(DATA_DIR, 'ai_daily_scores.json')

@@ -2,78 +2,7 @@
 
 ---
 
-## 1. 新电脑初始化（从零开始）
-
-### 第一步：克隆仓库
-
-```powershell
-# 如果需要代理访问 GitHub（v2rayN HTTP 端口）
-$env:HTTPS_PROXY="http://127.0.0.1:10809"
-
-# 克隆到你想放的目录
-cd "你的项目父目录"
-git clone https://github.com/aaronzhangbb/stock-AI-systems.git
-cd stock-AI-systems
-```
-
-### 第二步：创建 Python 虚拟环境
-
-```powershell
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-
-# 安装依赖（用阿里云镜像加速）
-$env:PYTHONUTF8=1
-pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
-```
-
-### 第三步：创建本机配置文件
-
-```powershell
-# 复制模板
-Copy-Item .env.example .env
-```
-
-然后用编辑器打开 `.env`，根据这台电脑的情况修改：
-
-**低配电脑推荐配置：**
-```env
-INSTANCE_NAME=dev-low
-AUTO_ENABLED=false
-SCAN_LIMIT=500
-ENABLE_HEAVY_MODEL=false
-```
-
-**高配电脑推荐配置：**
-```env
-INSTANCE_NAME=dev-high
-AUTO_ENABLED=true
-SCAN_LIMIT=0
-ENABLE_HEAVY_MODEL=true
-```
-
-**云服务器推荐配置：**
-```env
-INSTANCE_NAME=server-prod
-AUTO_ENABLED=true
-SCAN_LIMIT=0
-ENABLE_HEAVY_MODEL=true
-```
-
-### 第四步：启动
-
-```powershell
-.\venv\Scripts\Activate.ps1
-streamlit run app.py --server.port 8501 --server.headless true
-```
-
-浏览器访问：**http://localhost:8501**
-
-> 也可以直接双击 `start.bat` 启动。
-
----
-
-## 2. 已有项目的电脑同步最新改造
+## 1. 已有项目的电脑同步最新改造
 
 如果这台电脑上已经有项目（之前 clone 过），只需要同步代码并配置 `.env`：
 
@@ -109,6 +38,20 @@ pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --tru
 .\venv\Scripts\Activate.ps1
 streamlit run app.py --server.port 8501 --server.headless true
 ```
+
+---
+
+## 2. 本机（低配电脑）快速启动
+
+```powershell
+cd "c:\xunqing\project\finace dock system\stock-AI-systems"
+.\venv\Scripts\Activate.ps1
+streamlit run app.py --server.port 8501 --server.headless true
+```
+
+浏览器访问：**http://localhost:8501**
+
+> 也可以直接双击 `start.bat` 启动。
 
 ---
 

@@ -101,6 +101,7 @@ output = {
         'above_70': int(len(df[df['ai_score'] >= 70])),
         'mean_score': round(float(df['ai_score'].mean()), 1),
     },
+    'all_scores': df.to_dict(orient='records'),
     'top50': df.head(50).to_dict(orient='records'),
     'bottom10': df.tail(10).to_dict(orient='records'),
 }

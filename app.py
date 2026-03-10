@@ -725,6 +725,7 @@ if page == "📡 每日信号":
                             'above_90': int(len(ai_df[ai_df['final_score'] >= 90])) if 'final_score' in ai_df.columns else 0,
                             'above_80': int(len(ai_df[ai_df['final_score'] >= 80])) if 'final_score' in ai_df.columns else 0,
                         },
+                        'all_scores': ai_df.to_dict(orient='records'),
                         'top50': ai_df.head(50).to_dict(orient='records'),
                     }
                     score_out = os.path.join(config.DATA_ROOT, 'ai_daily_scores.json')
@@ -745,8 +746,9 @@ if page == "📡 每日信号":
                 if os.path.exists(score_path):
                     with open(score_path, 'r', encoding='utf-8') as f:
                         cached_scores = _json.load(f)
-                    if cached_scores.get('top50'):
-                        ai_df = pd.DataFrame(cached_scores['top50'])
+                    score_list = cached_scores.get('all_scores') or cached_scores.get('top50')
+                    if score_list:
+                        ai_df = pd.DataFrame(score_list)
                         st.info(f"📂 显示缓存结果（扫描时间: {cached_scores.get('scan_time', 'N/A')}）· 点击上方按钮更新")
             except Exception:
                 pass

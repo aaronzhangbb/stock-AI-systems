@@ -92,7 +92,7 @@ class AutoTrader:
         conn.close()
 
     def _load_ai_recommendations(self) -> list:
-        """加载AI扫描推荐结果"""
+        """加载AI扫描推荐结果（买入候选取 top50）"""
         score_path = os.path.join(DATA_DIR, 'ai_daily_scores.json')
         if not os.path.exists(score_path):
             logger.warning("AI扫描结果文件不存在: %s", score_path)
@@ -101,7 +101,7 @@ class AutoTrader:
             with open(score_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                return data.get('top50', [])
+                return data.get('top50', data.get('all_scores', [])[:50])
             elif isinstance(data, list):
                 return data[:50]
             return []
@@ -178,18 +178,18 @@ class AutoTrader:
         skipped = []
         scan_result = None
 
-        # ========== 第一步: 检查持仓, 决定卖出 ==========
-        _progress('sell', '正在检查持仓，执行止盈止损卖出...')
-        sell_actions = self._execute_sells()
-        sold_codes = {a['stock_code'] for a in sell_actions}
-        _progress('sell', f'卖出完成: {len(sell_actions)}只')
-
-        # ========== 第二步: 重新AI扫描 (可选) ==========
+        # ========== 第一步: AI扫描 (可选，确保卖出时用最新评分) ==========
         if rescan:
             _progress('scan', '正在运行AI策略扫描，生成最新推荐 (耗时3~10分钟)...')
             scan_result = self._refresh_ai_scores()
             n_scored = scan_result.get('total_scored', 0) if scan_result else 0
             _progress('scan', f'扫描完成: 评估{n_scored}只股票')
+
+        # ========== 第二步: 检查持仓, 决定卖出 (使用最新AI评分) ==========
+        _progress('sell', '正在检查持仓，执行止盈止损卖出...')
+        sell_actions = self._execute_sells()
+        sold_codes = {a['stock_code'] for a in sell_actions}
+        _progress('sell', f'卖出完成: {len(sell_actions)}只')
 
         # ========== 第三步: 筛选新标的, 决定买入 ==========
         _progress('buy', '正在筛选标的，执行买入...')
@@ -240,14 +240,19 @@ class AutoTrader:
             return {'action_list': [], 'total_scored': 0, 'error': str(e)}
 
     def _load_ai_scores_map(self) -> dict:
-        """加载最新 AI 评分表 {stock_code: score}"""
+        """加载最新 AI 评分表 {stock_code: score}，优先读取全量评分"""
         score_path = os.path.join(DATA_DIR, 'ai_daily_scores.json')
         if not os.path.exists(score_path):
             return {}
         try:
             with open(score_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            items = data.get('top50', []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            if isinstance(data, dict):
+                items = data.get('all_scores') or data.get('top50', [])
+            elif isinstance(data, list):
+                items = data
+            else:
+                items = []
             return {r.get('stock_code', ''): r.get('final_score', 0) or r.get('ai_score', 0) for r in items if r.get('stock_code')}
         except Exception:
             return {}
