@@ -187,7 +187,7 @@ class AutoTrader:
 
         # ========== 第二步: 检查持仓, 决定卖出 (使用最新AI评分) ==========
         _progress('sell', '正在检查持仓，执行止盈止损卖出...')
-        sell_actions = self._execute_sells()
+        sell_actions, hold_alerts = self._execute_sells()
         sold_codes = {a['stock_code'] for a in sell_actions}
         _progress('sell', f'卖出完成: {len(sell_actions)}只')
 
@@ -222,6 +222,7 @@ class AutoTrader:
         return {
             'sell_actions': sell_actions,
             'buy_actions': buy_actions,
+            'hold_alerts': hold_alerts,
             'skipped': skipped,
             'scan_result': scan_result,
             'summary': summary,
@@ -272,14 +273,15 @@ class AutoTrader:
         except Exception:
             return 0
 
-    def _execute_sells(self) -> list:
-        """检查持仓并执行卖出"""
+    def _execute_sells(self) -> tuple:
+        """检查持仓并执行卖出，返回 (sell_actions, hold_alerts)"""
         sell_actions = []
+        hold_alerts = []
         positions = self.account.get_positions()
 
         if positions.empty:
             logger.info("[卖出] 无持仓, 跳过")
-            return sell_actions
+            return sell_actions, hold_alerts
 
         # 加载最新 AI 评分（用于技术面卖出确认）
         ai_scores_map = self._load_ai_scores_map()
@@ -369,8 +371,19 @@ class AutoTrader:
                 if alerts:
                     logger.info("[持有] %s(%s) 价格%.2f, 提示: %s",
                                 name, code, current_price, '; '.join(alerts))
+                    hold_alerts.append({
+                        'stock_code': code,
+                        'stock_name': name,
+                        'price': current_price,
+                        'avg_cost': avg_cost,
+                        'pnl_pct': round((current_price - avg_cost) / avg_cost * 100, 2) if avg_cost > 0 else 0,
+                        'advice': advice,
+                        'alerts': alerts,
+                        'ai_score_at_buy': result.get('ai_score_at_buy', 0),
+                        'ai_score_current': result.get('ai_score_current', 0),
+                    })
 
-        return sell_actions
+        return sell_actions, hold_alerts
 
     def _execute_buys(self, exclude_codes: set = None) -> tuple:
         """

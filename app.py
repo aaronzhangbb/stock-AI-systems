@@ -1713,7 +1713,7 @@ elif page == "🎮 模拟交易":
                     err_msg = str(e)
                     status_container.update(label=f"执行失败: {err_msg[:80]}...", state="error", expanded=True)
                     _err_result = {
-                        'sell_actions': [], 'buy_actions': [], 'skipped': [],
+                        'sell_actions': [], 'buy_actions': [], 'hold_alerts': [], 'skipped': [],
                         'summary': f"❌ 执行异常: {err_msg}",
                         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                         'error': err_msg,
@@ -1756,6 +1756,25 @@ elif page == "🎮 模拟交易":
 <span style="color:#7a869a;margin-left:12px;">@{sa['price']:.2f} × {sa['shares']}股</span>
 <span style="color:{pnl_c};margin-left:12px;font-weight:700;">盈亏 {sa['pnl']:+,.0f}({sa['pnl_pct']:+.1f}%)</span>
 <br><span style="color:#94a3b8;font-size:12px;">{sa['reason']}</span>
+</div>""", unsafe_allow_html=True)
+
+            # 持仓提醒（AI未确认的卖出信号）
+            if last_result.get('hold_alerts'):
+                st.markdown("###### 📋 持仓提醒（AI未确认，暂不卖出）")
+                for ha in last_result['hold_alerts']:
+                    pnl_pct = ha.get('pnl_pct', 0)
+                    pnl_c = "#e06060" if pnl_pct >= 0 else "#5eba7d"
+                    alert_text = '; '.join(ha.get('alerts', []))
+                    ai_buy = ha.get('ai_score_at_buy', 0)
+                    ai_now = ha.get('ai_score_current', 0)
+                    ai_info = f"AI评分: {ai_buy:.0f}→{ai_now:.0f}" if ai_buy > 0 and ai_now > 0 else ""
+                    st.markdown(f"""
+<div style="background:rgba(91,141,239,0.06);border-left:3px solid #f0a050;border-radius:6px;padding:8px 14px;margin-bottom:6px;">
+<b style="color:#e2e8f0;">{ha['stock_name']}({ha['stock_code']})</b>
+<span style="color:#7a869a;margin-left:12px;">现价 ¥{ha['price']:.2f}</span>
+<span style="color:{pnl_c};margin-left:12px;">{pnl_pct:+.1f}%</span>
+<span style="color:#f0a050;margin-left:12px;">{ai_info}</span>
+<br><span style="color:#f0a050;font-size:12px;">⚠️ {alert_text}</span>
 </div>""", unsafe_allow_html=True)
 
             # 买入操作
