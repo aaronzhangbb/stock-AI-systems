@@ -22,6 +22,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import config
+from src.utils.state_store import write_json_atomic, write_pickle_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +85,9 @@ def fetch_bulk_valuation(cache_minutes=60):
     })
 
     try:
-        df.to_pickle(cache_path)
-    except Exception:
-        pass
+        write_pickle_atomic(cache_path, df)
+    except Exception as exc:
+        logger.warning("[基本面] 估值缓存写入失败: %s", exc)
 
     elapsed = time.time() - t0
     logger.info(f"[基本面] 获取完成: {len(df)} 只股票, 耗时 {elapsed:.1f}s")
@@ -402,12 +403,9 @@ def get_industry_benchmarks(cache_minutes=120):
         benchmarks[board] = entry
 
     try:
-        import json
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(cache_path, 'w', encoding='utf-8') as f:
-            json.dump(benchmarks, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+        write_json_atomic(cache_path, benchmarks)
+    except Exception as exc:
+        logger.warning("[基本面] 行业基准缓存写入失败: %s", exc)
 
     benchmarks['_time'] = time.time()
     _industry_benchmark_cache = benchmarks

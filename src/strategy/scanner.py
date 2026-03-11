@@ -201,7 +201,7 @@ class MarketScanner:
 
     def scan_market(self, board_names: list = None, strategy_ids: list = None,
                     signal_filter: str = None, days: int = 730,
-                    progress_callback=None, max_workers: int = 2) -> dict:
+                    progress_callback=None, max_workers: int = None) -> dict:
         """
         全市场扫描
 
@@ -262,14 +262,16 @@ class MarketScanner:
         conn.commit()
         conn.close()
 
-        print(f"[扫描] 开始全市场扫描：{total} 只股票")
+        if max_workers is None:
+            max_workers = getattr(config, 'SCAN_WORKERS', 4)
+
+        print(f"[扫描] 开始全市场扫描：{total} 只股票 (workers={max_workers})")
 
         buy_signals = []
         sell_signals = []
         error_count = 0
         scanned = 0
 
-        # 使用线程池并发扫描
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
             for _, row in all_stocks.iterrows():
@@ -456,41 +458,38 @@ class MarketScanner:
         success = 0
         cached = 0
         failed = 0
+        warmup_workers = getattr(config, 'SCAN_WORKERS', 4)
 
-        print(f"[预热] 开始预热缓存：{total} 只股票")
+        print(f"[预热] 开始预热缓存：{total} 只股票 (workers={warmup_workers})")
 
-        for idx, row in all_stocks.iterrows():
-            code = row['stock_code']
-            name = row['stock_name']
-
-            # 跳过北交所（数据源覆盖不全）
+        def _warmup_single(code, name):
             if code.startswith(self.SKIP_PREFIXES):
-                success += 1  # 计入成功，不影响统计
-                count = success + cached + failed
-                if progress_callback and count % 20 == 0:
-                    progress_callback(count, total, name, 'skip')
-                continue
-
+                return code, name, 'skip'
             try:
-                # get_history_data 会自动处理缓存逻辑
                 df = get_history_data(code, days=days, use_cache=True)
-                if not df.empty:
-                    success += 1
-                    status = 'ok'
-                else:
-                    failed += 1
-                    status = 'empty'
+                return code, name, 'ok' if not df.empty else 'empty'
             except Exception as exc:
                 logger.warning("缓存预热失败 %s(%s): %s", name, code, exc)
-                failed += 1
-                status = 'error'
+                return code, name, 'error'
 
-            count = success + cached + failed
-            if progress_callback and count % 20 == 0:
-                progress_callback(count, total, name, status)
-
-            if count % 100 == 0:
-                print(f"  [{count}/{total}] 成功={success} 失败={failed}")
+        with ThreadPoolExecutor(max_workers=warmup_workers) as executor:
+            futures = {
+                executor.submit(_warmup_single, row['stock_code'], row['stock_name']): row
+                for _, row in all_stocks.iterrows()
+            }
+            for future in as_completed(futures):
+                code, name, status = future.result()
+                if status in ('ok', 'skip'):
+                    success += 1
+                elif status == 'empty':
+                    failed += 1
+                else:
+                    failed += 1
+                count = success + cached + failed
+                if progress_callback and count % 20 == 0:
+                    progress_callback(count, total, name, status)
+                if count % 100 == 0:
+                    print(f"  [{count}/{total}] 成功={success} 失败={failed}")
 
         print(f"[预热] 完成！成功={success} 失败={failed} / 总共={total}")
         return {'total': total, 'success': success, 'cached': cached, 'failed': failed}

@@ -62,6 +62,29 @@ def load_json_safe(
     return data
 
 
+def write_pickle_atomic(path: str, obj: Any) -> None:
+    """原子写入 pickle 文件，避免写到一半时被读取方看到损坏文件。"""
+    import pickle
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    fd, temp_path = tempfile.mkstemp(prefix=".tmp_", suffix=".pkl", dir=parent or None)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            pickle.dump(obj, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        raise
+
+
 def build_ai_scores_payload(
     ai_df,
     *,
@@ -98,8 +121,10 @@ def validate_ai_scores_payload(data: Any) -> bool:
     if not data.get("scan_date") or not data.get("scan_time"):
         return False
     all_scores = data.get("all_scores")
+    if not isinstance(all_scores, list):
+        return False
     top50 = data.get("top50")
-    if not isinstance(all_scores, list) or not isinstance(top50, list):
+    if top50 is not None and not isinstance(top50, list):
         return False
     return True
 

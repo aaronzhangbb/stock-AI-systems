@@ -423,7 +423,9 @@ def run_all_strategies(df: pd.DataFrame, strategy_ids: list = None) -> list:
             if result:
                 result['strategy_id'] = sid
                 signals.append(result)
-        except Exception:
+        except Exception as exc:
+            import logging as _st_log
+            _st_log.getLogger(__name__).warning("策略 %s 执行失败: %s", sid, exc)
             continue
 
     # 按信号强度降序排列

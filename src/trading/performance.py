@@ -16,8 +16,11 @@ import pandas as pd
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+import logging
 import config
 from src.utils.db import connect_db
+
+logger = logging.getLogger(__name__)
 
 
 class PerformanceAnalyzer:
@@ -412,7 +415,8 @@ class PerformanceAnalyzer:
                     'post_10d_close_pct': post_10d_close_pct,
                     'label': label,
                 })
-            except Exception:
+            except Exception as exc:
+                logger.warning("卖后行情分析失败 %s: %s", code, exc)
                 continue
 
         return pd.DataFrame(results) if results else pd.DataFrame()

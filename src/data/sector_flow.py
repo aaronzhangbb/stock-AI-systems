@@ -24,6 +24,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import config
+from src.utils.state_store import write_pickle_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +89,9 @@ def fetch_sector_ranking(cache_minutes=60):
     df = df.sort_values('pct_change', ascending=False).reset_index(drop=True)
 
     try:
-        df.to_pickle(cache_path)
-    except Exception:
-        pass
+        write_pickle_atomic(cache_path, df)
+    except Exception as exc:
+        logger.warning("[板块] 板块排名缓存写入失败: %s", exc)
 
     elapsed = time.time() - t0
     logger.info(f"[板块] 板块排名获取完成: {len(df)} 个板块, 耗时 {elapsed:.1f}s")
@@ -144,9 +145,9 @@ def fetch_sector_fund_flow(cache_minutes=60):
     df = df.sort_values('main_net_flow', ascending=False).reset_index(drop=True)
 
     try:
-        df.to_pickle(cache_path)
-    except Exception:
-        pass
+        write_pickle_atomic(cache_path, df)
+    except Exception as exc:
+        logger.warning("[板块] 板块资金流缓存写入失败: %s", exc)
 
     elapsed = time.time() - t0
     logger.info(f"[板块] 板块资金流获取完成: {len(df)} 个板块, 耗时 {elapsed:.1f}s")

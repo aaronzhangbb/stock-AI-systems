@@ -190,7 +190,9 @@ def score_stock(df: pd.DataFrame) -> dict:
         score = round(prob * 100, 1)
         confidence = round(acc * 100, 1)
 
-    except Exception:
+    except Exception as exc:
+        import logging as _as_log
+        _as_log.getLogger(__name__).warning("ML评分计算降级: %s", exc)
         recent = y[-60:]
         score = round(recent.mean() * 100, 1)
         confidence = 0

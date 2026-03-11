@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import config
+from src.utils.db import connect_db
 
 # 缓存数据库路径（项目根目录/data/stock_cache.db）
 CACHE_DB_PATH = os.path.join(config.DATA_ROOT, 'stock_cache.db')
@@ -30,7 +31,7 @@ class DataCache:
     def _init_db(self):
         """初始化缓存数据库"""
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
 
         # 日线数据缓存表
@@ -85,7 +86,7 @@ class DataCache:
         if df.empty:
             return
 
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         try:
             for _, row in df.iterrows():
                 date_str = row['date'].strftime('%Y-%m-%d') if isinstance(row['date'], (datetime, pd.Timestamp)) else str(row['date'])
@@ -148,7 +149,7 @@ class DataCache:
         返回:
             DataFrame: 缓存的K线数据，如果无缓存返回空 DataFrame
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         try:
             query = 'SELECT * FROM daily_kline WHERE stock_code = ?'
             params = [stock_code]
@@ -184,7 +185,7 @@ class DataCache:
 
     def get_cache_info(self, stock_code: str) -> dict:
         """获取某只股票的缓存信息"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
         cursor.execute('SELECT first_date, last_date, updated_at FROM cache_meta WHERE stock_code = ?', (stock_code,))
         row = cursor.fetchone()
@@ -206,7 +207,7 @@ class DataCache:
 
     def save_stock_name(self, stock_code: str, stock_name: str):
         """缓存股票名称"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         conn.execute('''
             INSERT OR REPLACE INTO stock_names (stock_code, stock_name, updated_at)
             VALUES (?, ?, ?)
@@ -216,7 +217,7 @@ class DataCache:
 
     def load_stock_name(self, stock_code: str) -> str:
         """加载缓存的股票名称"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
         cursor.execute('SELECT stock_name FROM stock_names WHERE stock_code = ?', (stock_code,))
         row = cursor.fetchone()
@@ -225,7 +226,7 @@ class DataCache:
 
     def get_all_cached_stocks(self) -> pd.DataFrame:
         """获取所有已缓存的股票列表"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         df = pd.read_sql_query('''
             SELECT m.stock_code, n.stock_name, m.first_date, m.last_date, m.updated_at,
                    (SELECT COUNT(*) FROM daily_kline k WHERE k.stock_code = m.stock_code) as total_records
@@ -238,7 +239,7 @@ class DataCache:
 
     def clear_cache(self, stock_code: str = None):
         """清除缓存"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         if stock_code:
             conn.execute('DELETE FROM daily_kline WHERE stock_code = ?', (stock_code,))
             conn.execute('DELETE FROM cache_meta WHERE stock_code = ?', (stock_code,))

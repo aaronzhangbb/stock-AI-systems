@@ -27,8 +27,9 @@ def _load_dotenv(dotenv_path: str = ".env"):
                 value = value.strip().strip('"').strip("'")
                 if key and key not in os.environ:
                     os.environ[key] = value
-    except Exception:
-        pass
+    except Exception as exc:
+        import sys
+        print(f"[config] 警告: 加载 .env 文件失败: {exc}", file=sys.stderr)
 
 
 _load_dotenv()
@@ -134,6 +135,7 @@ AI_SELL_SCORE_DROP = _env_int("AI_SELL_SCORE_DROP", 15)
 
 # ==================== 性能参数（低配机/高配机/服务器差异化） ====================
 SCAN_LIMIT = _env_int("SCAN_LIMIT", 0)                        # 扫描股票上限, 0=全量
+SCAN_WORKERS = _env_int("SCAN_WORKERS", 4)                     # 扫描/预热并发线程数
 ENABLE_HEAVY_MODEL = _env_bool("ENABLE_HEAVY_MODEL", "true")   # 是否启用重模型 (Transformer等)
 
 # ==================== 数据库路径（基于 DATA_ROOT） ====================

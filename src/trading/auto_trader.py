@@ -290,23 +290,12 @@ class AutoTrader:
             return {'action_list': [], 'total_scored': 0, 'error': str(e)}
 
     def _load_ai_scores_map(self) -> dict:
-        """加载最新 AI 评分表 {stock_code: score}，优先读取全量评分"""
-        score_path = os.path.join(DATA_DIR, 'ai_daily_scores.json')
-        if not os.path.exists(score_path):
+        """加载最新 AI 评分表 {stock_code: score}，复用 _load_ai_scores_payload 的校验逻辑"""
+        data = self._load_ai_scores_payload()
+        if not data:
             return {}
-        try:
-            with open(score_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                items = data.get('all_scores') or data.get('top50', [])
-            elif isinstance(data, list):
-                items = data
-            else:
-                items = []
-            return {r.get('stock_code', ''): r.get('final_score', 0) or r.get('ai_score', 0) for r in items if r.get('stock_code')}
-        except Exception as exc:
-            logger.warning("加载 AI 评分表失败: %s", exc)
-            return {}
+        items = data.get('all_scores') or data.get('top50', [])
+        return {r.get('stock_code', ''): r.get('final_score', 0) or r.get('ai_score', 0) for r in items if r.get('stock_code')}
 
     def _get_buy_ai_score(self, stock_code: str) -> float:
         """从 auto_trade_log 查询该股票最近一次买入时的 AI 评分"""
@@ -661,8 +650,8 @@ class AutoTrader:
         import pandas as pd
         conn = connect_db(self.db_path)
         df = pd.read_sql_query(
-            f'SELECT * FROM auto_trade_log ORDER BY created_at DESC LIMIT {limit}',
-            conn
+            'SELECT * FROM auto_trade_log ORDER BY created_at DESC LIMIT ?',
+            conn, params=(limit,)
         )
         conn.close()
         return df
@@ -672,8 +661,8 @@ class AutoTrader:
         import pandas as pd
         conn = connect_db(self.db_path)
         df = pd.read_sql_query(
-            f'SELECT * FROM daily_snapshot ORDER BY date DESC LIMIT {limit}',
-            conn
+            'SELECT * FROM daily_snapshot ORDER BY date DESC LIMIT ?',
+            conn, params=(limit,)
         )
         conn.close()
         return df

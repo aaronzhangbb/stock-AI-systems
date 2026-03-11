@@ -32,6 +32,7 @@ _MIN_REQUEST_INTERVAL = 0.12  # 每次请求最少间隔（秒）
 _realtime_cache = None       # 缓存的 DataFrame
 _realtime_cache_time = 0     # 缓存时间戳
 _REALTIME_CACHE_TTL = 60     # 缓存有效期（秒）
+_realtime_cache_lock = threading.Lock()
 
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -422,30 +423,28 @@ def get_stock_name(stock_code: str) -> str:
 
 
 def get_realtime_quotes(stock_codes: list = None) -> pd.DataFrame:
-    """获取实时行情数据（带60秒内存缓存，避免重复拉取全市场）"""
+    """获取实时行情数据（带60秒内存缓存+线程锁，避免并发重复拉取全市场）"""
     global _realtime_cache, _realtime_cache_time
 
-    now = time.time()
+    with _realtime_cache_lock:
+        now = time.time()
 
-    # 如果缓存有效，直接使用
-    if _realtime_cache is not None and (now - _realtime_cache_time) < _REALTIME_CACHE_TTL:
-        df = _realtime_cache
-    else:
-        # 缓存过期或不存在，重新拉取
-        try:
-            df = ak.stock_zh_a_spot_em()
-            df = df.rename(columns={
-                '代码': 'code', '名称': 'name', '最新价': 'close',
-                '涨跌幅': 'pctChg', '涨跌额': 'change', '成交量': 'volume',
-                '成交额': 'amount', '今开': 'open', '最高': 'high',
-                '最低': 'low', '昨收': 'pre_close', '换手率': 'turnover',
-            })
-            # 更新缓存
-            _realtime_cache = df
-            _realtime_cache_time = now
-        except Exception as e:
-            print(f"获取实时行情失败: {e}")
-            return pd.DataFrame()
+        if _realtime_cache is not None and (now - _realtime_cache_time) < _REALTIME_CACHE_TTL:
+            df = _realtime_cache
+        else:
+            try:
+                df = ak.stock_zh_a_spot_em()
+                df = df.rename(columns={
+                    '代码': 'code', '名称': 'name', '最新价': 'close',
+                    '涨跌幅': 'pctChg', '涨跌额': 'change', '成交量': 'volume',
+                    '成交额': 'amount', '今开': 'open', '最高': 'high',
+                    '最低': 'low', '昨收': 'pre_close', '换手率': 'turnover',
+                })
+                _realtime_cache = df
+                _realtime_cache_time = now
+            except Exception as e:
+                print(f"获取实时行情失败: {e}")
+                return pd.DataFrame()
 
     if stock_codes:
         codes = [_clean_stock_code(c) for c in stock_codes]

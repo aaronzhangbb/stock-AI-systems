@@ -110,8 +110,9 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
                 if rt and rt.get('close', 0) > 0:
                     current_price = float(rt['close'])
                     result['price_source'] = 'realtime'
-            except Exception:
-                pass
+            except Exception as exc:
+                import logging as _pm_log
+                _pm_log.getLogger(__name__).warning("获取实时价格失败 %s: %s", stock_code, exc)
 
         result['current_price'] = current_price
 
@@ -189,7 +190,9 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
             efficiency = np.clip(_eff if not np.isnan(_eff) else 0.5, 0.1, 0.9)
             
             result['stop_method'] = 'atr_dynamic'
-        except Exception:
+        except Exception as exc:
+            import logging as _pm_log
+            _pm_log.getLogger(__name__).warning("ATR计算降级 %s: %s", stock_code, exc)
             efficiency = 0.5
 
         # ================================================================
@@ -370,8 +373,9 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
                         result['alerts'].append(
                             f"📋策略卖出信号（{names}）{score_info}[AI未确认,仅提醒]"
                         )
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging as _pm_log
+            _pm_log.getLogger(__name__).warning("策略卖出信号计算失败 %s: %s", stock_code, exc)
 
         # 汇总建议
         if urgency >= 2:
@@ -415,7 +419,8 @@ def check_all_manual_positions(account: PaperTradingAccount = None,
             if info.get('close', 0) > 0:
                 rt_prices[code] = info['close']
     except Exception as e:
-        print(f"批量获取实时价格失败，将逐只获取: {e}")
+        import logging as _pm_log
+        _pm_log.getLogger(__name__).warning("批量获取实时价格失败，将逐只获取: %s", e)
 
     results = []
     for _, row in manual_df.iterrows():

@@ -40,7 +40,9 @@ def validate_single_strategy(df: pd.DataFrame, strategy_func, hold_days: int = 5
         window = data.iloc[:i + 1].copy()
         try:
             result = strategy_func(window)
-        except Exception:
+        except Exception as exc:
+            import logging as _sv_log
+            _sv_log.getLogger(__name__).warning("策略验证回滚失败 %s: %s", strategy_id, exc)
             continue
 
         if result is None:

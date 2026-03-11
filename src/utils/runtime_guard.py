@@ -43,8 +43,8 @@ def file_lock(lock_path: str, *, stale_seconds: int = 7200, metadata: dict | Non
                 raise RuntimeError(f"发现运行中的任务锁: {lock_path}")
         except RuntimeError:
             raise
-        except Exception:
-            raise RuntimeError(f"发现运行中的任务锁: {lock_path}")
+        except Exception as exc:
+            raise RuntimeError(f"发现运行中的任务锁: {lock_path} ({exc})") from exc
 
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)

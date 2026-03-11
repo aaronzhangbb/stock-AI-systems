@@ -155,7 +155,7 @@ class PaperTradingAccount:
         """获取交易记录"""
         conn = connect_db(self.db_path)
         df = pd.read_sql_query(
-            f'SELECT * FROM trades ORDER BY created_at DESC LIMIT {limit}', conn
+            'SELECT * FROM trades ORDER BY created_at DESC LIMIT ?', conn, params=(limit,)
         )
         conn.close()
         return df

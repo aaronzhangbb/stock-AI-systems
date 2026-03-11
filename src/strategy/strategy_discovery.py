@@ -432,7 +432,9 @@ def load_learned_rules() -> dict:
     try:
         with open(RULES_PATH, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except Exception:
+    except Exception as exc:
+        import logging as _sd_log
+        _sd_log.getLogger(__name__).warning("加载 learned_rules.json 失败: %s", exc)
         return {}
 
 
