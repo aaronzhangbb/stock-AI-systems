@@ -103,20 +103,23 @@ class AutoTrader:
         """记录自动交易日志"""
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         today = datetime.now().strftime('%Y-%m-%d')
-        conn = connect_db(self.db_path)
-        cursor = conn.cursor()
         action_key = f"{today}:{stock_code}:{action}:{self.run_id}"
-        cursor.execute(
-            'INSERT INTO auto_trade_log '
-            '(trade_date, stock_code, stock_name, action, price, shares, amount, '
-            'reason, ai_score, stop_price, target_price, pnl, pnl_pct, advice_json, trade_id, run_id, action_key, created_at) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (today, stock_code, stock_name, action, price, shares,
-             round(price * shares, 2), reason, ai_score, stop_price,
-             target_price, pnl, pnl_pct, advice_json, trade_id, self.run_id, action_key, now)
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn = connect_db(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT INTO auto_trade_log '
+                '(trade_date, stock_code, stock_name, action, price, shares, amount, '
+                'reason, ai_score, stop_price, target_price, pnl, pnl_pct, advice_json, trade_id, run_id, action_key, created_at) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (today, stock_code, stock_name, action, price, shares,
+                 round(price * shares, 2), reason, ai_score, stop_price,
+                 target_price, pnl, pnl_pct, advice_json, trade_id, self.run_id, action_key, now)
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logger.error("[交易日志] 写入失败 %s: %s", action_key, exc)
 
     def _load_ai_scores_payload(self) -> dict | None:
         score_path = os.path.join(DATA_DIR, 'ai_daily_scores.json')

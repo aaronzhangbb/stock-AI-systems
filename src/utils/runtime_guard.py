@@ -20,7 +20,9 @@ def file_lock(lock_path: str, *, stale_seconds: int = 7200, metadata: dict | Non
     """
     基于独占创建的轻量运行锁，兼容 Windows。
     """
-    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    lock_dir = os.path.dirname(lock_path)
+    if lock_dir:
+        os.makedirs(lock_dir, exist_ok=True)
     payload = {
         "pid": os.getpid(),
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
