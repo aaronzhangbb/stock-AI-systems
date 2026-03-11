@@ -27,7 +27,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import config
 from src.trading.paper_trading import PaperTradingAccount
 from src.trading.position_monitor import check_single_position
+from src.trading.decision_kernel import calc_a_share_lot_shares, should_execute_sell_advice
 from src.data.data_fetcher import get_realtime_price, batch_get_realtime_prices
+from src.utils.db import connect_db
+from src.utils.runtime_guard import make_run_id
+from src.utils.state_store import is_ai_scores_fresh, load_json_safe, validate_ai_scores_payload
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +41,15 @@ DATA_DIR = config.DATA_ROOT
 class AutoTrader:
     """AI自动交易引擎"""
 
-    def __init__(self, account: PaperTradingAccount = None):
+    def __init__(self, account: PaperTradingAccount = None, run_id: str = None):
         self.account = account or PaperTradingAccount()
         self.db_path = self.account.db_path
+        self.run_id = run_id or make_run_id("auto-trade")
         self._init_log_table()
 
     def _init_log_table(self):
         """创建自动交易日志表"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS auto_trade_log (
@@ -63,9 +68,29 @@ class AutoTrader:
                 pnl REAL DEFAULT 0,
                 pnl_pct REAL DEFAULT 0,
                 advice_json TEXT DEFAULT '',
+                trade_id INTEGER DEFAULT 0,
+                run_id TEXT DEFAULT '',
+                action_key TEXT DEFAULT '',
                 created_at TEXT NOT NULL
             )
         ''')
+        cursor.execute("PRAGMA table_info(auto_trade_log)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+        for name, ddl in {
+            'trade_id': "ALTER TABLE auto_trade_log ADD COLUMN trade_id INTEGER DEFAULT 0",
+            'run_id': "ALTER TABLE auto_trade_log ADD COLUMN run_id TEXT DEFAULT ''",
+            'action_key': "ALTER TABLE auto_trade_log ADD COLUMN action_key TEXT DEFAULT ''",
+        }.items():
+            if name not in existing_cols:
+                cursor.execute(ddl)
+        cursor.execute(
+            """
+            UPDATE auto_trade_log
+            SET action_key = 'legacy-' || id
+            WHERE action_key IS NULL OR action_key = ''
+            """
+        )
+        cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_auto_trade_action_key ON auto_trade_log(action_key)')
         conn.commit()
         conn.close()
 
@@ -73,41 +98,49 @@ class AutoTrader:
                    price: float, shares: int, reason: str,
                    ai_score: float = 0, stop_price: float = 0,
                    target_price: float = 0, pnl: float = 0,
-                   pnl_pct: float = 0, advice_json: str = ''):
+                   pnl_pct: float = 0, advice_json: str = '',
+                   trade_id: int = 0):
         """记录自动交易日志"""
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         today = datetime.now().strftime('%Y-%m-%d')
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
+        action_key = f"{today}:{stock_code}:{action}:{self.run_id}"
         cursor.execute(
             'INSERT INTO auto_trade_log '
             '(trade_date, stock_code, stock_name, action, price, shares, amount, '
-            'reason, ai_score, stop_price, target_price, pnl, pnl_pct, advice_json, created_at) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            'reason, ai_score, stop_price, target_price, pnl, pnl_pct, advice_json, trade_id, run_id, action_key, created_at) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             (today, stock_code, stock_name, action, price, shares,
              round(price * shares, 2), reason, ai_score, stop_price,
-             target_price, pnl, pnl_pct, advice_json, now)
+             target_price, pnl, pnl_pct, advice_json, trade_id, self.run_id, action_key, now)
         )
         conn.commit()
         conn.close()
 
+    def _load_ai_scores_payload(self) -> dict | None:
+        score_path = os.path.join(DATA_DIR, 'ai_daily_scores.json')
+        return load_json_safe(
+            score_path,
+            default=None,
+            validator=validate_ai_scores_payload,
+            log_prefix='AI评分',
+        )
+
+    def _can_use_fresh_scores(self) -> bool:
+        payload = self._load_ai_scores_payload()
+        return is_ai_scores_fresh(payload)
+
     def _load_ai_recommendations(self) -> list:
         """加载AI扫描推荐结果（买入候选取 top50）"""
-        score_path = os.path.join(DATA_DIR, 'ai_daily_scores.json')
-        if not os.path.exists(score_path):
-            logger.warning("AI扫描结果文件不存在: %s", score_path)
+        data = self._load_ai_scores_payload()
+        if not data:
+            logger.warning("AI扫描结果文件不存在或结构无效")
             return []
-        try:
-            with open(score_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return data.get('top50', data.get('all_scores', [])[:50])
-            elif isinstance(data, list):
-                return data[:50]
+        if not is_ai_scores_fresh(data):
+            logger.warning("AI扫描结果已过期，已禁止自动买入")
             return []
-        except Exception as e:
-            logger.error("读取AI扫描结果失败: %s", e)
-            return []
+        return data.get('top50', data.get('all_scores', [])[:50])
 
     def _get_current_prices(self, codes: list) -> dict:
         """批量获取当前价格"""
@@ -126,8 +159,8 @@ class AutoTrader:
                     rt = get_realtime_price(code)
                     if rt and rt.get('close', 0) > 0:
                         prices[code] = rt['close']
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("逐只获取价格失败 %s: %s", code, exc)
         return prices
 
     def execute(self, rescan: bool = False, progress_callback=None) -> dict:
@@ -151,7 +184,7 @@ class AutoTrader:
         """
         if not config.AUTO_ENABLED:
             return {
-                'sell_actions': [], 'buy_actions': [], 'skipped': [],
+                'sell_actions': [], 'buy_actions': [], 'hold_alerts': [], 'skipped': [],
                 'scan_result': None,
                 'summary': '自动交易已关闭 (AUTO_ENABLED=False)',
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -175,8 +208,10 @@ class AutoTrader:
 
         sell_actions = []
         buy_actions = []
+        hold_alerts = []
         skipped = []
         scan_result = None
+        can_buy = True
 
         # ========== 第一步: AI扫描 (可选，确保卖出时用最新评分) ==========
         if rescan:
@@ -184,6 +219,9 @@ class AutoTrader:
             scan_result = self._refresh_ai_scores()
             n_scored = scan_result.get('total_scored', 0) if scan_result else 0
             _progress('scan', f'扫描完成: 评估{n_scored}只股票')
+            can_buy = bool(scan_result and scan_result.get('status') == 'ok' and self._can_use_fresh_scores())
+        else:
+            can_buy = self._can_use_fresh_scores()
 
         # ========== 第二步: 检查持仓, 决定卖出 (使用最新AI评分) ==========
         _progress('sell', '正在检查持仓，执行止盈止损卖出...')
@@ -192,9 +230,13 @@ class AutoTrader:
         _progress('sell', f'卖出完成: {len(sell_actions)}只')
 
         # ========== 第三步: 筛选新标的, 决定买入 ==========
-        _progress('buy', '正在筛选标的，执行买入...')
-        buy_actions, skipped = self._execute_buys(exclude_codes=sold_codes)
-        _progress('buy', f'买入完成: {len(buy_actions)}只')
+        if can_buy:
+            _progress('buy', '正在筛选标的，执行买入...')
+            buy_actions, skipped = self._execute_buys(exclude_codes=sold_codes)
+            _progress('buy', f'买入完成: {len(buy_actions)}只')
+        else:
+            skipped.append({'code': '', 'name': '', 'reason': 'AI评分未通过新鲜度校验，已跳过自动买入'})
+            _progress('buy', 'AI评分未通过新鲜度校验，已跳过自动买入')
 
         # ========== 第四步: 保存每日资产快照 ==========
         _progress('snapshot', '保存资产快照...')
@@ -212,6 +254,8 @@ class AutoTrader:
             summary_parts.append("已重新扫描")
         if n_buy > 0:
             summary_parts.append(f"买入{n_buy}只")
+        if not can_buy:
+            summary_parts.append("已跳过自动买入")
         if not summary_parts:
             summary_parts.append("无操作")
 
@@ -225,6 +269,8 @@ class AutoTrader:
             'hold_alerts': hold_alerts,
             'skipped': skipped,
             'scan_result': scan_result,
+            'run_id': self.run_id,
+            'can_buy': can_buy,
             'summary': summary,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         }
@@ -232,7 +278,7 @@ class AutoTrader:
     def _refresh_ai_scores(self) -> dict:
         """重新运行AI扫描，生成最新推荐 (更新 ai_daily_scores.json)"""
         try:
-            from daily_job import run_ai_super_scan
+            from src.services.ai_scan_service import run_ai_super_scan
             result = run_ai_super_scan()
             logger.info("[扫描] AI扫描完成, %d只操作推荐", len(result.get('action_list', [])))
             return result
@@ -255,13 +301,14 @@ class AutoTrader:
             else:
                 items = []
             return {r.get('stock_code', ''): r.get('final_score', 0) or r.get('ai_score', 0) for r in items if r.get('stock_code')}
-        except Exception:
+        except Exception as exc:
+            logger.warning("加载 AI 评分表失败: %s", exc)
             return {}
 
     def _get_buy_ai_score(self, stock_code: str) -> float:
         """从 auto_trade_log 查询该股票最近一次买入时的 AI 评分"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = connect_db(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT ai_score FROM auto_trade_log WHERE stock_code=? AND action='买入' ORDER BY created_at DESC LIMIT 1",
@@ -270,7 +317,8 @@ class AutoTrader:
             row = cursor.fetchone()
             conn.close()
             return float(row[0]) if row and row[0] else 0
-        except Exception:
+        except Exception as exc:
+            logger.warning("查询买入 AI 评分失败 %s: %s", stock_code, exc)
             return 0
 
     def _execute_sells(self) -> tuple:
@@ -329,11 +377,7 @@ class AutoTrader:
             alerts = result.get('alerts', [])
 
             # 根据配置决定卖出紧急度
-            should_sell = False
-            if advice == '立即卖出':
-                should_sell = True
-            elif advice == '建议卖出' and config.AUTO_SELL_URGENCY <= 1:
-                should_sell = True
+            should_sell = should_execute_sell_advice(advice)
 
             if should_sell:
                 reason = '; '.join(alerts) if alerts else advice
@@ -362,6 +406,7 @@ class AutoTrader:
                         stop_price=result.get('stop_price', 0),
                         target_price=result.get('target_price', 0),
                         pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 2),
+                        trade_id=sell_result.get('trade_id', 0),
                     )
                     logger.info("[卖出] %s(%s) @%.2f %d股, 盈亏%.2f(%.1f%%), 原因: %s",
                                 name, code, current_price, shares, pnl, pnl_pct, reason)
@@ -513,7 +558,7 @@ class AutoTrader:
                 target_amount = account_info['initial_capital'] * config.POSITION_RATIO
                 target_amount = min(target_amount, available_cash * 0.95)
 
-            shares = int(target_amount / current_price / 100) * 100
+            shares = calc_a_share_lot_shares(target_amount, current_price)
             if shares < 100:
                 skipped.append({
                     'code': code, 'name': name,
@@ -559,6 +604,7 @@ class AutoTrader:
                     stop_price=cand['sell_stop'],
                     target_price=cand['sell_target'],
                     advice_json=advice_json,
+                    trade_id=buy_result.get('trade_id', 0),
                 )
                 logger.info("[买入] %s(%s) @%.2f %d股, AI=%s, 止损=%.2f, 目标=%.2f",
                             name, code, current_price, shares,
@@ -580,12 +626,12 @@ class AutoTrader:
             equity = self.account.get_total_equity(rt_prices)
 
             today = datetime.now().strftime('%Y-%m-%d')
-            conn = sqlite3.connect(self.db_path)
+            conn = connect_db(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
-                'INSERT OR REPLACE INTO daily_snapshot (date, cash, stock_value, total_equity) '
-                'VALUES (?, ?, ?, ?)',
-                (today, equity['cash'], equity['stock_value'], equity['total_equity'])
+                'INSERT OR REPLACE INTO daily_snapshot (date, cash, stock_value, total_equity, run_id) '
+                'VALUES (?, ?, ?, ?, ?)',
+                (today, equity['cash'], equity['stock_value'], equity['total_equity'], self.run_id)
             )
             conn.commit()
             conn.close()
@@ -596,7 +642,7 @@ class AutoTrader:
 
     def get_trade_log(self, limit: int = 50) -> list:
         """获取自动交易日志"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
             'SELECT * FROM auto_trade_log ORDER BY created_at DESC LIMIT ?',
@@ -610,7 +656,7 @@ class AutoTrader:
     def get_trade_log_df(self, limit: int = 200):
         """获取自动交易日志 (DataFrame)"""
         import pandas as pd
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         df = pd.read_sql_query(
             f'SELECT * FROM auto_trade_log ORDER BY created_at DESC LIMIT {limit}',
             conn
@@ -621,7 +667,7 @@ class AutoTrader:
     def get_daily_snapshots(self, limit: int = 365):
         """获取每日资产快照"""
         import pandas as pd
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         df = pd.read_sql_query(
             f'SELECT * FROM daily_snapshot ORDER BY date DESC LIMIT {limit}',
             conn

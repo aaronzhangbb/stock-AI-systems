@@ -33,6 +33,7 @@ from datetime import datetime
 sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, os.path.dirname(__file__))
 import config
+from src.utils.state_store import write_json_atomic
 
 DATA_DIR = config.DATA_ROOT
 
@@ -371,8 +372,7 @@ def main():
     all_results['layers_trained'] = layers
 
     report_path = os.path.join(DATA_DIR, 'retrain_report.json')
-    with open(report_path, 'w', encoding='utf-8') as f:
-        json.dump(all_results, f, ensure_ascii=False, indent=2, default=str)
+    write_json_atomic(report_path, all_results)
 
     # 汇总
     print("\n" + "=" * 70)

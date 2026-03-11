@@ -24,6 +24,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import config
+from src.utils.state_store import write_json_atomic
 from src.strategy.ai_scoring import build_features
 
 # 模型和策略缓存路径
@@ -237,8 +238,7 @@ def train_model(max_stocks: int = 300, force: bool = False) -> dict:
         }
 
         os.makedirs(MODEL_DIR, exist_ok=True)
-        with open(RULES_PATH, 'w', encoding='utf-8') as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
+        write_json_atomic(RULES_PATH, result)
 
         # 保存模型
         with open(MODEL_PATH, 'wb') as f:

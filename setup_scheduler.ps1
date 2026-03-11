@@ -32,7 +32,7 @@ $TaskNameDaily = "QuantX_DailyJob"
 $TaskNameIntraday = "QuantX_IntradayMonitor"
 $TaskDescription = "QuantX量化交易系统 - 每日收盘后自动更新数据并运行AI策略扫描"
 $IntradayDescription = "QuantX量化交易系统 - 盘中实时持仓监控（止损止盈预警）"
-$ProjectDir = "F:\project\my finance"
+$ProjectDir = $PSScriptRoot
 $BatPath = Join-Path $ProjectDir "run_daily.bat"
 $IntradayBatPath = Join-Path $ProjectDir "run_intraday.bat"
 $LogDir = Join-Path $ProjectDir "data"
@@ -150,6 +150,7 @@ function Register-Task {
     # 记录注册信息到JSON
     $info = @{
         daily_task = $TaskNameDaily
+        run_time = $RunTime
         daily_time = $RunTime
         intraday_task = $TaskNameIntraday
         intraday_time = "09:25"

@@ -15,6 +15,11 @@ import pandas as pd
 from typing import Optional, Tuple, Dict, List
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+import config
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -693,9 +698,7 @@ class AIScorer:
         import xgboost as xgb
         
         if model_path is None:
-            model_path = os.path.join(
-                os.path.dirname(__file__), '..', '..', 'data', 'xgb_v2_model.json'
-            )
+            model_path = os.path.join(config.DATA_ROOT, 'xgb_v2_model.json')
         
         self.model_path = os.path.abspath(model_path)
         self.model = None
@@ -774,7 +777,8 @@ class AIScorer:
                 'close': close,
                 'features': features,
             }
-        except Exception:
+        except Exception as exc:
+            logger.warning("单股评分失败: %s", exc)
             return None
     
     def _compute_trade_advice(self, data: pd.DataFrame, close: float,
@@ -1176,7 +1180,8 @@ class AIScorer:
                 'exit_rules': exit_rules,
                 'validity_days': validity_end,
             }
-        except Exception:
+        except Exception as exc:
+            logger.warning("交易建议降级为保底方案: %s", exc)
             return {
                 'buy_price': round(close * 0.97, 2),
                 'buy_upper': round(close * 1.01, 2),
@@ -1256,15 +1261,14 @@ class AIScorer:
         try:
             # 尝试读取缓存的情绪数据 (避免每次扫描都重新采集)
             import json
-            sentiment_path = os.path.join(
-                os.path.dirname(__file__), '..', '..', 'data', 'market_sentiment.json')
+            sentiment_path = os.path.join(config.DATA_ROOT, 'market_sentiment.json')
             if os.path.exists(sentiment_path):
                 with open(sentiment_path, 'r', encoding='utf-8') as f:
                     sentiment_data = json.load(f)
                 if progress_callback:
                     print(f"    [Scan] 已加载情绪数据: {sentiment_data.get('sentiment_score', '?')}分")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("读取市场情绪缓存失败: %s", exc)
         
         results = []
         total = len(valid_codes)
@@ -1339,7 +1343,8 @@ class AIScorer:
                     **advice,
                 })
                 
-            except Exception:
+            except Exception as exc:
+                logger.warning("扫描 %s 失败: %s", code, exc)
                 continue
         
         if not results:

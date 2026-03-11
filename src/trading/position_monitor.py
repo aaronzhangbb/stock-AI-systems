@@ -120,15 +120,26 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
 
         # 买入以来的交易日数
         buy_date_str = buy_date[:10]
+        latest_kline_date = str(df['date'].astype(str).iloc[-1])[:10]
+        today_str = datetime.now().strftime('%Y-%m-%d')
         mask = df['date'].astype(str) >= buy_date_str
         df_since = df[mask]
-        if df_since.empty:
-            df_since = df.tail(30)
-        
-        days_held = len(df_since)
-        result['days_held'] = days_held
 
-        high_since = float(df_since['high'].max())
+        if df_since.empty:
+            # 当天买入但日线尚未落库时，不能错误回退到近30天，
+            # 否则会把新仓误判成“已持有很久”。
+            if buy_date_str >= latest_kline_date or buy_date_str == today_str:
+                days_held = 1
+                high_since = max(float(current_price), float(buy_price))
+            else:
+                df_since = df.tail(1)
+                days_held = 1
+                high_since = max(float(df_since['high'].iloc[-1]), float(current_price), float(buy_price))
+        else:
+            days_held = max(len(df_since), 1)
+            high_since = float(df_since['high'].max())
+
+        result['days_held'] = days_held
         result['high_since_buy'] = high_since
 
         # ================================================================

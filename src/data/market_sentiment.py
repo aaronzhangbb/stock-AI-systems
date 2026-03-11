@@ -29,6 +29,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import config
+from src.utils.state_store import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -588,8 +589,7 @@ def get_market_sentiment(verbose: bool = True) -> dict:
     # 保存到文件
     save_path = os.path.join(DATA_DIR, 'market_sentiment.json')
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(save_path, 'w', encoding='utf-8') as f:
-        json.dump(result, f, ensure_ascii=False, indent=2, default=str)
+    write_json_atomic(save_path, result)
 
     if verbose:
         print(f"[情绪] 完成! 情绪分: {sentiment['score']} ({sentiment['level']}) 耗时{elapsed:.1f}s")

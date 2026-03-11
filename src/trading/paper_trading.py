@@ -11,6 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import config
+from src.utils.db import connect_db
 
 
 class PaperTradingAccount:
@@ -18,14 +19,14 @@ class PaperTradingAccount:
 
     def __init__(self, db_path: str = None):
         if db_path is None:
-            db_path = os.path.join(os.path.dirname(__file__), '..', '..', config.DB_PATH)
-        self.db_path = db_path
+            db_path = config.DB_PATH
+        self.db_path = os.path.abspath(db_path)
         self._init_db()
 
     def _init_db(self):
         """初始化数据库表"""
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
 
         # 账户信息表
@@ -76,7 +77,8 @@ class PaperTradingAccount:
                 date TEXT NOT NULL UNIQUE,
                 cash REAL NOT NULL,
                 stock_value REAL NOT NULL,
-                total_equity REAL NOT NULL
+                total_equity REAL NOT NULL,
+                run_id TEXT DEFAULT ''
             )
         ''')
 
@@ -109,6 +111,10 @@ class PaperTradingAccount:
             cursor.execute('ALTER TABLE manual_positions ADD COLUMN sell_date TEXT DEFAULT ""')
             cursor.execute('ALTER TABLE manual_positions ADD COLUMN actual_pnl REAL DEFAULT 0')
             cursor.execute('ALTER TABLE manual_positions ADD COLUMN actual_pnl_pct REAL DEFAULT 0')
+        try:
+            cursor.execute('SELECT run_id FROM daily_snapshot LIMIT 1')
+        except sqlite3.OperationalError:
+            cursor.execute('ALTER TABLE daily_snapshot ADD COLUMN run_id TEXT DEFAULT ""')
 
         conn.commit()
 
@@ -125,7 +131,7 @@ class PaperTradingAccount:
 
     def get_account_info(self) -> dict:
         """获取账户信息"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
         cursor.execute('SELECT initial_capital, cash FROM account WHERE id=1')
         row = cursor.fetchone()
@@ -140,14 +146,14 @@ class PaperTradingAccount:
 
     def get_positions(self) -> pd.DataFrame:
         """获取当前持仓"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         df = pd.read_sql_query('SELECT * FROM positions WHERE shares > 0', conn)
         conn.close()
         return df
 
     def get_trades(self, limit: int = 50) -> pd.DataFrame:
         """获取交易记录"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         df = pd.read_sql_query(
             f'SELECT * FROM trades ORDER BY created_at DESC LIMIT {limit}', conn
         )
@@ -158,7 +164,7 @@ class PaperTradingAccount:
                             buy_date: str, shares: int = 0, note: str = '') -> dict:
         """添加手动买入跟踪记录"""
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
         try:
             cursor.execute(
@@ -176,14 +182,14 @@ class PaperTradingAccount:
 
     def list_manual_positions(self) -> pd.DataFrame:
         """获取手动买入跟踪列表"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         df = pd.read_sql_query('SELECT * FROM manual_positions WHERE status = "holding"', conn)
         conn.close()
         return df
 
     def remove_manual_position(self, stock_code: str, buy_date: str) -> None:
         """移除手动买入跟踪记录（不记录卖出信息，仅状态关闭）"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
             'UPDATE manual_positions SET status="closed", updated_at=? WHERE stock_code=? AND buy_date=?',
@@ -206,7 +212,7 @@ class PaperTradingAccount:
             dict: {success, message, pnl, pnl_pct}
         """
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
         try:
             # 查找对应持仓
@@ -251,7 +257,7 @@ class PaperTradingAccount:
 
     def list_closed_positions(self, limit: int = 50) -> pd.DataFrame:
         """获取已卖出/已关闭的持仓记录"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         df = pd.read_sql_query(
             f'SELECT * FROM manual_positions WHERE status IN ("sold", "closed") '
             f'ORDER BY updated_at DESC LIMIT {limit}', conn
@@ -291,7 +297,7 @@ class PaperTradingAccount:
             return {'success': False, 'message': f'资金不足！需要 ¥{total_cost:.2f}，可用 ¥{cash:.2f}'}
 
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
 
         try:
@@ -324,6 +330,7 @@ class PaperTradingAccount:
                 'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                 (stock_code, stock_name, '买入', price, shares, amount, commission, now)
             )
+            trade_id = cursor.lastrowid
 
             conn.commit()
 
@@ -335,6 +342,7 @@ class PaperTradingAccount:
                 'price': price,
                 'cost': total_cost,
                 'remaining_cash': new_cash,
+                'trade_id': trade_id,
             }
 
         except Exception as e:
@@ -356,7 +364,7 @@ class PaperTradingAccount:
         返回:
             dict: 交易结果
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
 
         cursor.execute('SELECT shares, avg_cost FROM positions WHERE stock_code=?', (stock_code,))
@@ -405,6 +413,7 @@ class PaperTradingAccount:
                 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (stock_code, stock_name, '卖出', price, shares, amount, commission, stamp_tax, profit, now)
             )
+            trade_id = cursor.lastrowid
 
             conn.commit()
 
@@ -419,6 +428,7 @@ class PaperTradingAccount:
                 'profit': profit,
                 'profit_pct': profit_pct,
                 'remaining_cash': new_cash,
+                'trade_id': trade_id,
             }
 
         except Exception as e:
@@ -485,7 +495,7 @@ class PaperTradingAccount:
 
     def reset_account(self):
         """重置模拟账户"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         cursor = conn.cursor()
         cursor.execute('DELETE FROM positions')
         cursor.execute('DELETE FROM trades')

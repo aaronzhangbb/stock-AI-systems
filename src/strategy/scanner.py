@@ -20,6 +20,10 @@ from src.strategy.strategies import run_all_strategies, STRATEGY_REGISTRY
 from src.strategy.ai_scoring import score_stock, compute_price_targets
 from src.strategy.strategy_validator import validate_all_strategies, compute_composite_score
 from src.strategy.strategy_discovery import apply_learned_rules, load_learned_rules
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 # 扫描结果数据库
 SIGNAL_DB_PATH = os.path.join(config.DATA_ROOT, 'signals.db')
@@ -143,8 +147,8 @@ class MarketScanner:
                     lr['strategy_id'] = lr.get('strategy_id', 'ml_learned')
                     lr['strategy'] = lr.get('strategy', 'ML学习策略')
                     results.append(lr)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("学习策略应用失败 %s: %s", stock_code, exc)
             
             close_price = float(df['close'].iloc[-1]) if not df.empty else 0
             ml = score_stock(df)
@@ -153,7 +157,8 @@ class MarketScanner:
             try:
                 validations = validate_all_strategies(df, hold_days=config.STRATEGY_HOLD_DAYS)
                 composite = compute_composite_score(results, validations)
-            except Exception:
+            except Exception as exc:
+                logger.warning("策略验证失败 %s: %s", stock_code, exc)
                 validations = {}
                 composite = ml.get('score', 0)
 
@@ -189,8 +194,8 @@ class MarketScanner:
                     'stop_price': prices.get('stop_price', 0) if r['signal'] == 'buy' else 0,
                 })
 
-        except Exception:
-            pass  # 静默失败，不中断扫描
+        except Exception as exc:
+            logger.warning("扫描单股失败 %s(%s): %s", stock_name, stock_code, exc)
 
         return signals
 
@@ -287,7 +292,8 @@ class MarketScanner:
                             buy_signals.append(sig)
                         else:
                             sell_signals.append(sig)
-                except Exception:
+                except Exception as exc:
+                    logger.warning("并发扫描结果汇总失败: %s", exc)
                     error_count += 1
 
                 if progress_callback and scanned % 10 == 0:
@@ -474,7 +480,8 @@ class MarketScanner:
                 else:
                     failed += 1
                     status = 'empty'
-            except Exception:
+            except Exception as exc:
+                logger.warning("缓存预热失败 %s(%s): %s", name, code, exc)
                 failed += 1
                 status = 'error'
 

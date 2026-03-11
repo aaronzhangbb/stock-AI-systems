@@ -23,8 +23,11 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import config
 from src.trading.performance import PerformanceAnalyzer
+from src.utils.state_store import load_json_safe, write_json_atomic
+import logging
 
 DATA_DIR = config.DATA_ROOT
+logger = logging.getLogger(__name__)
 
 
 class StrategyLearner:
@@ -314,8 +317,8 @@ class StrategyLearner:
                     'suggestion': f"「{worst_cat['reason']}」的卖出条件可能偏敏感，建议结合AI评分确认",
                     'confidence': min(worst_cat['count'] / 5, 1.0),
                 })
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("卖出时机分析失败: %s", exc)
         return insights
 
     def _analyze_overall_patterns(self, trades: pd.DataFrame) -> list:
@@ -379,18 +382,12 @@ class StrategyLearner:
         """保存学习报告到文件"""
         try:
             out_path = os.path.join(DATA_DIR, 'strategy_insights.json')
-            with open(out_path, 'w', encoding='utf-8') as f:
-                json.dump(report, f, ensure_ascii=False, indent=2, default=str)
-        except Exception:
-            pass
+            write_json_atomic(out_path, report)
+        except Exception as exc:
+            logger.warning("保存策略学习报告失败: %s", exc)
+            return
 
     def load_latest_report(self) -> dict:
         """加载最近一次的学习报告"""
         report_path = os.path.join(DATA_DIR, 'strategy_insights.json')
-        if not os.path.exists(report_path):
-            return {}
-        try:
-            with open(report_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            return {}
+        return load_json_safe(report_path, default={}, log_prefix='策略学习')

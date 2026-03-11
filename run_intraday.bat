@@ -5,7 +5,8 @@ echo   QuantX 盘中实时监控
 echo   %date% %time%
 echo ============================================
 
-cd /d "F:\project\my finance"
+set "PROJECT_DIR=%~dp0"
+cd /d "%PROJECT_DIR%"
 
 :: 激活虚拟环境
 call venv\Scripts\activate.bat

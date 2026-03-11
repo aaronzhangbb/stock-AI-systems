@@ -11,6 +11,11 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import config
 from src.strategy.strategy import apply_strategy
+from src.trading.decision_kernel import (
+    calc_a_share_lot_shares,
+    should_enter_backtest_position,
+    should_exit_backtest_position,
+)
 
 
 class BacktestResult:
@@ -88,11 +93,10 @@ def run_backtest(df: pd.DataFrame, initial_capital: float = None, position_ratio
         signal = row['signal']
         date = row['date']
 
-        if signal == 1 and shares == 0:
+        if should_enter_backtest_position(signal, shares):
             # 买入信号，且当前空仓
             available = cash * position_ratio
-            # A股最少买100股（1手）
-            buy_shares = int(available / current_price / 100) * 100
+            buy_shares = calc_a_share_lot_shares(available, current_price)
             if buy_shares >= 100:
                 cost = buy_shares * current_price
                 # 计算佣金
@@ -112,7 +116,7 @@ def run_backtest(df: pd.DataFrame, initial_capital: float = None, position_ratio
                         'commission': commission,
                     })
 
-        elif signal == -1 and shares > 0:
+        elif should_exit_backtest_position(signal, shares):
             # 卖出信号，且当前有持仓
             revenue = shares * current_price
             # 计算佣金和印花税

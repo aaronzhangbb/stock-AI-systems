@@ -17,6 +17,7 @@ import pickle
 sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, os.path.dirname(__file__))
 import config
+from src.utils.state_store import write_json_atomic
 
 import numpy as np
 import pandas as pd
@@ -369,8 +370,7 @@ if shap_df is not None:
     ]
 
 result_path = os.path.join(config.DATA_ROOT, 'xgb_v2_result.json')
-with open(result_path, 'w', encoding='utf-8') as f:
-    json.dump(result, f, ensure_ascii=False, indent=2, default=str)
+write_json_atomic(result_path, result)
 print(f"  结果已保存: {result_path}")
 
 # ============================================================

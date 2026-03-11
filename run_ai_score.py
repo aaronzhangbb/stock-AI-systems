@@ -15,6 +15,7 @@ import config
 from src.data.data_cache import DataCache
 from src.data.stock_pool import StockPool
 from src.strategy.ai_engine_v2 import AIScorer
+from src.utils.state_store import write_json_atomic
 
 print("=" * 90)
 print("  AI策略V2.0 — 每日全市场评分扫描")
@@ -107,6 +108,5 @@ output = {
 }
 
 out_path = os.path.join(config.DATA_ROOT, 'ai_daily_scores.json')
-with open(out_path, 'w', encoding='utf-8') as f:
-    json.dump(output, f, ensure_ascii=False, indent=2, default=str)
+write_json_atomic(out_path, output)
 print(f"\n结果已保存: {out_path}")

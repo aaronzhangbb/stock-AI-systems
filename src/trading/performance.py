@@ -17,6 +17,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import config
+from src.utils.db import connect_db
 
 
 class PerformanceAnalyzer:
@@ -24,11 +25,11 @@ class PerformanceAnalyzer:
 
     def __init__(self, db_path: str = None):
         if db_path is None:
-            db_path = os.path.join(os.path.dirname(__file__), '..', '..', config.DB_PATH)
-        self.db_path = db_path
+            db_path = config.DB_PATH
+        self.db_path = os.path.abspath(db_path)
 
     def _query_df(self, sql: str) -> pd.DataFrame:
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_db(self.db_path)
         df = pd.read_sql_query(sql, conn)
         conn.close()
         return df
@@ -45,86 +46,103 @@ class PerformanceAnalyzer:
             stock_code, stock_name, buy_date, buy_price, sell_date, sell_price,
             shares, pnl, pnl_pct, hold_days, ai_score, reason
         """
-        buys = self._query_df(
-            "SELECT * FROM auto_trade_log WHERE action='买入' ORDER BY created_at"
-        )
-        sells = self._query_df(
-            "SELECT * FROM auto_trade_log WHERE action='卖出' ORDER BY created_at"
+        logs = self._query_df(
+            "SELECT * FROM auto_trade_log ORDER BY created_at, id"
         )
 
-        if buys.empty or sells.empty:
+        if logs.empty:
             return pd.DataFrame()
 
         trades = []
-        sell_used = set()
+        queues: dict[str, list[dict]] = {}
 
-        for _, buy_row in buys.iterrows():
-            code = buy_row['stock_code']
-            buy_date = buy_row['trade_date']
-
-            # 找到该股票第一个尚未配对的卖出
-            matched_sells = sells[
-                (sells['stock_code'] == code) &
-                (sells['trade_date'] >= buy_date) &
-                (~sells.index.isin(sell_used))
-            ]
-
-            if matched_sells.empty:
+        for _, row in logs.iterrows():
+            code = row['stock_code']
+            action = row['action']
+            if action == '买入':
+                queues.setdefault(code, []).append({
+                    'stock_name': row.get('stock_name', ''),
+                    'buy_date': row['trade_date'],
+                    'buy_created_at': row.get('created_at', row['trade_date']),
+                    'buy_price': float(row['price']),
+                    'remaining_shares': int(row['shares']),
+                    'ai_score': row.get('ai_score', 0),
+                    'stop_price': row.get('stop_price', 0),
+                    'target_price': row.get('target_price', 0),
+                })
                 continue
 
-            sell_row = matched_sells.iloc[0]
-            sell_used.add(sell_row.name)
+            if action != '卖出' or code not in queues:
+                continue
 
-            buy_dt = pd.to_datetime(buy_row['trade_date'])
-            sell_dt = pd.to_datetime(sell_row['trade_date'])
-            hold_days = max((sell_dt - buy_dt).days, 1)
+            remaining_sell = int(row['shares'])
+            while remaining_sell > 0 and queues.get(code):
+                buy_lot = queues[code][0]
+                matched_shares = min(remaining_sell, buy_lot['remaining_shares'])
+                buy_dt = pd.to_datetime(buy_lot['buy_created_at'])
+                sell_dt = pd.to_datetime(row.get('created_at', row['trade_date']))
+                hold_days = max((sell_dt - buy_dt).days, 1)
+                sell_price = float(row['price'])
+                buy_price = float(buy_lot['buy_price'])
+                pnl = (sell_price - buy_price) * matched_shares
+                pnl_pct = (sell_price - buy_price) / buy_price * 100 if buy_price > 0 else 0
 
-            trades.append({
-                'stock_code': code,
-                'stock_name': buy_row.get('stock_name', ''),
-                'buy_date': buy_row['trade_date'],
-                'buy_price': buy_row['price'],
-                'sell_date': sell_row['trade_date'],
-                'sell_price': sell_row['price'],
-                'shares': buy_row['shares'],
-                'pnl': sell_row.get('pnl', 0),
-                'pnl_pct': sell_row.get('pnl_pct', 0),
-                'hold_days': hold_days,
-                'ai_score': buy_row.get('ai_score', 0),
-                'sell_reason': sell_row.get('reason', ''),
-                'stop_price': buy_row.get('stop_price', 0),
-                'target_price': buy_row.get('target_price', 0),
-            })
+                trades.append({
+                    'stock_code': code,
+                    'stock_name': buy_lot.get('stock_name', ''),
+                    'buy_date': buy_lot['buy_date'],
+                    'buy_price': buy_price,
+                    'sell_date': row['trade_date'],
+                    'sell_price': sell_price,
+                    'shares': matched_shares,
+                    'pnl': round(pnl, 2),
+                    'pnl_pct': round(pnl_pct, 2),
+                    'hold_days': hold_days,
+                    'ai_score': buy_lot.get('ai_score', 0),
+                    'sell_reason': row.get('reason', ''),
+                    'stop_price': buy_lot.get('stop_price', 0),
+                    'target_price': buy_lot.get('target_price', 0),
+                })
+
+                remaining_sell -= matched_shares
+                buy_lot['remaining_shares'] -= matched_shares
+                if buy_lot['remaining_shares'] <= 0:
+                    queues[code].pop(0)
 
         return pd.DataFrame(trades) if trades else pd.DataFrame()
 
     def get_open_positions_from_log(self) -> pd.DataFrame:
         """获取当前仍在持仓的买入记录 (有买入无卖出)"""
-        buys = self._query_df(
-            "SELECT * FROM auto_trade_log WHERE action='买入' ORDER BY created_at"
-        )
-        sells = self._query_df(
-            "SELECT * FROM auto_trade_log WHERE action='卖出' ORDER BY created_at"
+        logs = self._query_df(
+            "SELECT * FROM auto_trade_log ORDER BY created_at, id"
         )
 
-        if buys.empty:
+        if logs.empty:
             return pd.DataFrame()
 
-        sell_counts = sells.groupby('stock_code').size().to_dict() if not sells.empty else {}
-        buy_counts = buys.groupby('stock_code').size().to_dict()
+        queues: dict[str, list[dict]] = {}
+        for _, row in logs.iterrows():
+            code = row['stock_code']
+            action = row['action']
+            if action == '买入':
+                queues.setdefault(code, []).append(row.to_dict())
+                queues[code][-1]['remaining_shares'] = int(row['shares'])
+            elif action == '卖出' and code in queues:
+                remaining_sell = int(row['shares'])
+                while remaining_sell > 0 and queues.get(code):
+                    buy_lot = queues[code][0]
+                    matched = min(remaining_sell, buy_lot['remaining_shares'])
+                    remaining_sell -= matched
+                    buy_lot['remaining_shares'] -= matched
+                    if buy_lot['remaining_shares'] <= 0:
+                        queues[code].pop(0)
 
-        open_codes = set()
-        for code, n_buy in buy_counts.items():
-            n_sell = sell_counts.get(code, 0)
-            if n_buy > n_sell:
-                open_codes.add(code)
-
-        if not open_codes:
-            return pd.DataFrame()
-
-        return buys[buys['stock_code'].isin(open_codes)].drop_duplicates(
-            subset='stock_code', keep='last'
-        )
+        open_rows = []
+        for code, lots in queues.items():
+            for lot in lots:
+                if lot.get('remaining_shares', 0) > 0:
+                    open_rows.append(lot)
+        return pd.DataFrame(open_rows) if open_rows else pd.DataFrame()
 
     # ================================================================
     # 基础绩效指标
