@@ -25,8 +25,8 @@ import config
 from src.data.data_fetcher import batch_get_realtime_prices, get_realtime_price
 from src.trading.auto_trader import AutoTrader
 from src.trading.paper_trading import PaperTradingAccount
-from src.trading.position_monitor import is_trading_time
-from src.trading.decision_kernel import calc_a_share_lot_shares
+from src.trading.position_monitor import is_trading_time, check_single_position
+from src.trading.decision_kernel import calc_a_share_lot_shares, should_execute_sell_advice
 from src.utils.state_store import load_json_safe, write_json_atomic
 from src.utils.wechat_notifier import send_notification, format_buy_html, format_sell_html
 
@@ -36,67 +36,125 @@ PLAN_PATH = os.path.join(config.DATA_ROOT, "battle_plan.json")
 SNIPER_LOG_PATH = os.path.join(config.DATA_ROOT, "sniper_log.json")
 
 
-def generate_battle_plan(account: Optional[PaperTradingAccount] = None) -> dict:
+def generate_battle_plan(
+    account: Optional[PaperTradingAccount] = None,
+    sell_suggestions: list = None,
+    buy_suggestions: list = None,
+) -> dict:
     """
-    从最新 AI 评分和当前持仓生成「作战计划」
+    生成「作战计划」并写入 battle_plan.json
 
-    返回: battle_plan dict，同时写入 battle_plan.json
+    参数:
+        account: 模拟账户
+        sell_suggestions: 来自 AutoTrader 的卖出建议 (含 should_sell / advice 等丰富字段)
+        buy_suggestions: 来自 AutoTrader 的买入建议 (含 buy_price / buy_upper 等)
+    当 sell_suggestions / buy_suggestions 为空时，退化为从 ai_daily_scores + 持仓 自行构造
     """
     account = account or PaperTradingAccount()
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # 买入候选：从 ai_daily_scores.json 读取
-    scores_path = os.path.join(config.DATA_ROOT, "ai_daily_scores.json")
-    scores_data = load_json_safe(scores_path, default=None, log_prefix="作战计划")
-
-    buy_targets = []
-    if scores_data and scores_data.get("status") == "ok":
-        items = scores_data.get("top50") or (scores_data.get("all_scores", [])[:50])
-        positions = account.get_positions()
-        held_codes = set(positions["stock_code"].tolist()) if not positions.empty else set()
-
-        for rec in items:
-            code = rec.get("stock_code", "")
-            score = rec.get("final_score", 0) or rec.get("ai_score", 0)
-            buy_price = rec.get("buy_price", 0)
-            buy_upper = rec.get("buy_upper", 0)
-
-            if not code or code in held_codes:
-                continue
-            if score < config.AUTO_SCORE_THRESHOLD:
-                continue
-            if buy_price <= 0 or buy_upper <= 0:
-                continue
-
+    # ---- 买入候选 ----
+    if buy_suggestions:
+        buy_targets = []
+        for s in buy_suggestions:
             buy_targets.append({
-                "stock_code": code,
-                "stock_name": rec.get("stock_name", ""),
-                "ai_score": round(score, 1),
-                "buy_price": round(buy_price, 2),
-                "buy_upper": round(buy_upper, 2),
-                "sell_target": round(rec.get("sell_target", 0), 2),
-                "sell_stop": round(rec.get("sell_stop", 0), 2),
-                "risk_reward": round(rec.get("risk_reward", 0), 1) if rec.get("risk_reward") else None,
-                "hold_days": rec.get("hold_days", ""),
+                "stock_code": s["stock_code"],
+                "stock_name": s.get("stock_name", ""),
+                "ai_score": round(s.get("ai_score", 0), 1),
+                "buy_price": round(s.get("buy_price", 0), 2),
+                "buy_upper": round(s.get("buy_upper", 0), 2),
+                "sell_target": round(s.get("sell_target", 0), 2),
+                "sell_stop": round(s.get("sell_stop", 0), 2),
+                "risk_reward": round(s.get("risk_reward", 0), 1) if s.get("risk_reward") else None,
+                "hold_days": s.get("hold_days", ""),
+                "position_pct": s.get("position_pct", ""),
                 "status": "waiting",
             })
+    else:
+        buy_targets = []
+        scores_path = os.path.join(config.DATA_ROOT, "ai_daily_scores.json")
+        scores_data = load_json_safe(scores_path, default=None, log_prefix="作战计划")
+        if scores_data and scores_data.get("status") == "ok":
+            items = scores_data.get("top50") or (scores_data.get("all_scores", [])[:50])
+            positions = account.get_positions()
+            held_codes = set(positions["stock_code"].tolist()) if not positions.empty else set()
+            for rec in items:
+                code = rec.get("stock_code", "")
+                score = rec.get("final_score", 0) or rec.get("ai_score", 0)
+                buy_price = rec.get("buy_price", 0)
+                buy_upper = rec.get("buy_upper", 0)
+                if not code or code in held_codes:
+                    continue
+                if score < config.AUTO_SCORE_THRESHOLD:
+                    continue
+                if buy_price <= 0 or buy_upper <= 0:
+                    continue
+                buy_targets.append({
+                    "stock_code": code,
+                    "stock_name": rec.get("stock_name", ""),
+                    "ai_score": round(score, 1),
+                    "buy_price": round(buy_price, 2),
+                    "buy_upper": round(buy_upper, 2),
+                    "sell_target": round(rec.get("sell_target", 0), 2),
+                    "sell_stop": round(rec.get("sell_stop", 0), 2),
+                    "risk_reward": round(rec.get("risk_reward", 0), 1) if rec.get("risk_reward") else None,
+                    "hold_days": rec.get("hold_days", ""),
+                    "status": "waiting",
+                })
 
-    # 卖出监控：从当前持仓构造
-    sell_targets = []
-    positions = account.get_positions()
-    if not positions.empty:
-        for _, pos in positions.iterrows():
-            code = pos["stock_code"]
-            avg_cost = pos["avg_cost"]
+    # ---- 卖出监控 ----
+    if sell_suggestions:
+        sell_targets = []
+        for s in sell_suggestions:
             sell_targets.append({
-                "stock_code": code,
-                "stock_name": pos.get("stock_name", ""),
-                "avg_cost": round(avg_cost, 2),
-                "shares": int(pos["shares"]),
-                "sell_stop": round(avg_cost * (1 - config.STOP_LOSS_PCT), 2),
-                "sell_target": round(avg_cost * (1 + config.TAKE_PROFIT_PCT), 2),
-                "status": "monitoring",
+                "stock_code": s["stock_code"],
+                "stock_name": s.get("stock_name", ""),
+                "avg_cost": round(s.get("avg_cost", 0), 2),
+                "shares": int(s.get("shares", 0)),
+                "sell_stop": round(s.get("sell_stop", 0), 2),
+                "sell_target": round(s.get("sell_target", 0), 2),
+                "should_sell": s.get("should_sell", False),
+                "sell_reason": s.get("reason", ""),
+                "advice": s.get("advice", ""),
+                "time_phase": s.get("time_phase", ""),
+                "buy_date": s.get("buy_date", ""),
+                "ai_score_buy": s.get("ai_score_buy", 0),
+                "ai_score_now": s.get("ai_score_now", 0),
+                "status": "pending_sell" if s.get("should_sell") else "monitoring",
             })
+        positions = account.get_positions()
+        if not positions.empty:
+            existing_codes = {t["stock_code"] for t in sell_targets}
+            for _, pos in positions.iterrows():
+                code = pos["stock_code"]
+                if code in existing_codes:
+                    continue
+                avg_cost = pos["avg_cost"]
+                sell_targets.append({
+                    "stock_code": code,
+                    "stock_name": pos.get("stock_name", ""),
+                    "avg_cost": round(avg_cost, 2),
+                    "shares": int(pos["shares"]),
+                    "sell_stop": round(avg_cost * (1 - config.STOP_LOSS_PCT), 2),
+                    "sell_target": round(avg_cost * (1 + config.TAKE_PROFIT_PCT), 2),
+                    "status": "monitoring",
+                })
+    else:
+        sell_targets = []
+        positions = account.get_positions()
+        if not positions.empty:
+            for _, pos in positions.iterrows():
+                code = pos["stock_code"]
+                avg_cost = pos["avg_cost"]
+                sell_targets.append({
+                    "stock_code": code,
+                    "stock_name": pos.get("stock_name", ""),
+                    "avg_cost": round(avg_cost, 2),
+                    "shares": int(pos["shares"]),
+                    "sell_stop": round(avg_cost * (1 - config.STOP_LOSS_PCT), 2),
+                    "sell_target": round(avg_cost * (1 + config.TAKE_PROFIT_PCT), 2),
+                    "status": "monitoring",
+                })
 
     plan = {
         "plan_date": today,
@@ -111,7 +169,10 @@ def generate_battle_plan(account: Optional[PaperTradingAccount] = None) -> dict:
     }
 
     write_json_atomic(PLAN_PATH, plan)
-    logger.info("[作战计划] 已生成: 买入候选%d只, 卖出监控%d只", len(buy_targets[:20]), len(sell_targets))
+    n_pending = sum(1 for t in sell_targets if t.get("status") == "pending_sell")
+    n_monitor = sum(1 for t in sell_targets if t.get("status") == "monitoring")
+    logger.info("[作战计划] 已生成: 买入候选%d只, 建议卖出%d只, 持续监控%d只",
+                len(buy_targets[:20]), n_pending, n_monitor)
     return plan
 
 
@@ -153,7 +214,7 @@ def run_sniper_cycle(account: PaperTradingAccount, plan: dict, trader: AutoTrade
 
     if config.SNIPER_SELL_ENABLED:
         for t in plan.get("sell_targets", []):
-            if t.get("status") == "monitoring":
+            if t.get("status") in ("monitoring", "pending_sell"):
                 code = t["stock_code"]
                 all_codes.append(code)
                 sell_map[code] = t
@@ -234,12 +295,39 @@ def run_sniper_cycle(account: PaperTradingAccount, plan: dict, trader: AutoTrade
         triggered = False
         trigger_reason = ""
 
-        if stop > 0 and price <= stop:
-            triggered = True
-            trigger_reason = f"触碰止损 {stop:.2f}"
-        elif tp > 0 and price >= tp:
-            triggered = True
-            trigger_reason = f"触碰止盈 {tp:.2f}"
+        # 路径1: 计划建议卖出 (pending_sell) — 用 position_monitor 实时复核
+        if target.get("should_sell") and target.get("status") == "pending_sell":
+            try:
+                pm_result = check_single_position(
+                    stock_code=code,
+                    stock_name=target.get("stock_name", ""),
+                    buy_price=target.get("avg_cost", 0),
+                    buy_date=target.get("buy_date", ""),
+                    shares=shares,
+                    use_realtime=False,
+                    realtime_price=price,
+                    ai_score_at_buy=target.get("ai_score_buy", 0),
+                    ai_score_current=target.get("ai_score_now", 0),
+                )
+                if should_execute_sell_advice(pm_result.get("advice", "")):
+                    triggered = True
+                    trigger_reason = f"[计划卖出] {target.get('sell_reason', '')}"
+                else:
+                    logger.info("[狙击] %s 计划建议卖出但盘中复核未确认(advice=%s), 继续监控",
+                                code, pm_result.get("advice", ""))
+            except Exception as exc:
+                logger.warning("[狙击] %s 盘中复核异常: %s, 按计划执行", code, exc)
+                triggered = True
+                trigger_reason = f"[计划卖出] {target.get('sell_reason', '')}"
+
+        # 路径2: 基础止损/止盈价格触发 (所有 sell_targets)
+        if not triggered:
+            if stop > 0 and price <= stop:
+                triggered = True
+                trigger_reason = f"触碰止损 {stop:.2f}"
+            elif tp > 0 and price >= tp:
+                triggered = True
+                trigger_reason = f"触碰止盈 {tp:.2f}"
 
         if triggered and shares > 0:
             sell_result = account.sell(code, target.get("stock_name", ""), price, shares)

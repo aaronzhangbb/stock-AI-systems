@@ -15,15 +15,19 @@ AUTO_TRADE_RESULT_PATH = os.path.join(config.DATA_ROOT, "last_auto_result.json")
 AUTO_TRADE_LOCK_PATH = os.path.join(config.LOG_ROOT, "locks", "auto_trade.lock")
 
 
-def execute_auto_trade(account: PaperTradingAccount | None = None, *, rescan: bool = True, progress_callback=None) -> dict:
+def execute_auto_trade(
+    account: PaperTradingAccount | None = None,
+    *,
+    rescan: bool = True,
+    plan_only: bool = True,
+    progress_callback=None,
+) -> dict:
     account = account or PaperTradingAccount()
     with file_lock(AUTO_TRADE_LOCK_PATH, stale_seconds=7200, metadata={"job": "auto_trade"}):
         trader = AutoTrader(account)
-        result = trader.execute(rescan=rescan, progress_callback=progress_callback)
-        write_json_atomic(
-            AUTO_TRADE_RESULT_PATH,
-            {k: v for k, v in result.items() if k != "scan_result"},
-        )
+        result = trader.execute(rescan=rescan, plan_only=plan_only, progress_callback=progress_callback)
+        serializable = {k: v for k, v in result.items() if k not in ("scan_result", "plan")}
+        write_json_atomic(AUTO_TRADE_RESULT_PATH, serializable)
         return result
 
 

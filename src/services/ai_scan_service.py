@@ -25,6 +25,42 @@ logger = logging.getLogger(__name__)
 
 AI_SCORES_PATH = os.path.join(config.DATA_ROOT, "ai_daily_scores.json")
 AI_ACTION_LIST_PATH = os.path.join(config.DATA_ROOT, "ai_action_list.json")
+STRATEGY_INSIGHTS_PATH = os.path.join(config.DATA_ROOT, "strategy_insights.json")
+
+
+def _load_learned_params() -> dict:
+    """
+    从策略进化模块的学习报告中加载推荐参数, 供扫描/交易层使用。
+    如果文件不存在或功能关闭, 返回空 dict (调用方 fallback 到默认值)。
+    """
+    if not getattr(config, 'SCAN_USE_LEARNED_PARAMS', True):
+        return {}
+    try:
+        report = load_json_safe(STRATEGY_INSIGHTS_PATH, default={}, log_prefix="策略学习")
+        if not report or report.get('status') != 'ok':
+            return {}
+        return report.get('optimal_params', {})
+    except Exception:
+        return {}
+
+
+def _get_sentiment_weights() -> tuple[float, float, float, float]:
+    """
+    根据大盘情绪返回 (xgb_w, pattern_w, tf_w, threshold_adj) 的环境自适应权重。
+    threshold_adj 为阈值调整量 (弱势市 +5, 正常 0, 强势 0)。
+    """
+    try:
+        sentiment_path = os.path.join(config.DATA_ROOT, "market_sentiment.json")
+        sentiment = load_json_safe(sentiment_path, default={}, log_prefix="情绪")
+        score = sentiment.get('sentiment_score', 50)
+        if score >= 70:
+            return (0.40, 0.35, 0.25, 0)
+        elif score <= 30:
+            return (0.55, 0.25, 0.20, 5)
+        else:
+            return (0.50, 0.30, 0.20, 0)
+    except Exception:
+        return (0.50, 0.30, 0.20, 0)
 
 
 def get_ai_scores_payload():
@@ -61,7 +97,12 @@ def _save_action_list(action_list: list) -> None:
 
 
 def _build_action_list(ai_df: pd.DataFrame) -> list:
-    strong = ai_df[ai_df["final_score"] >= 85].head(5)
+    learned = _load_learned_params()
+    threshold = learned.get('score_threshold', 85)
+    threshold = max(threshold, 70)
+    position_map = learned.get('recommended_position_map', {})
+
+    strong = ai_df[ai_df["final_score"] >= threshold].head(5)
     action_list: list[dict] = []
     for _, row in strong.iterrows():
         close = row.get("close", 0)
@@ -71,8 +112,19 @@ def _build_action_list(ai_df: pd.DataFrame) -> list:
         sell_stp = row.get("sell_stop")
         hold = row.get("hold_days", "3~5天")
         rr = row.get("risk_reward")
-        pos = row.get("position_pct", "10%")
         final = row.get("final_score", 0)
+
+        pos = row.get("position_pct", "10%")
+        if position_map:
+            ai_s = row.get("ai_score", 0) or 0
+            if ai_s >= 90 and '90+' in position_map:
+                pos = f"{int(position_map['90+'] * 100)}%"
+            elif ai_s >= 85 and '85-90' in position_map:
+                pos = f"{int(position_map['85-90'] * 100)}%"
+            elif ai_s >= 80 and '80-85' in position_map:
+                pos = f"{int(position_map['80-85'] * 100)}%"
+            elif '75-80' in position_map:
+                pos = f"{int(position_map['75-80'] * 100)}%"
 
         expire = "若盈利：止损上移至成本价，再观察1~2天；若亏损：收盘无条件卖出"
         tgt_pct = f"+{(sell_tgt / close - 1) * 100:.1f}%" if pd.notna(sell_tgt) and close > 0 else ""
@@ -201,6 +253,10 @@ def run_ai_super_scan(progress_callback=None, warmup_days: int = 730) -> dict:
             except Exception as exc:
                 logger.warning("[AI扫描] Transformer跳过: %s", exc)
 
+        xgb_w, pat_w, tf_w, _th_adj = _get_sentiment_weights()
+        logger.info("[AI扫描] 环境权重: XGB=%.2f, Pattern=%.2f, TF=%.2f, 阈值调整=%+d",
+                    xgb_w, pat_w, tf_w, _th_adj)
+
         pat_win_rates = []
         pat_descs = []
         pat_confs = []
@@ -230,7 +286,7 @@ def run_ai_super_scan(progress_callback=None, warmup_days: int = 730) -> dict:
                 tf_s = 52.9
                 tf_score_list.append(None)
 
-            fused = xgb_score * 0.5 + pat_wr * 0.3 + tf_s * 0.2
+            fused = xgb_score * xgb_w + pat_wr * pat_w + tf_s * tf_w
             final_scores.append(round(fused, 1))
 
         ai_df["pattern_win_rate"] = pat_win_rates

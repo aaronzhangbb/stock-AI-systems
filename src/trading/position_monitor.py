@@ -27,6 +27,17 @@ from src.strategy.strategies import run_all_strategies
 from src.trading.paper_trading import PaperTradingAccount
 
 
+def _load_active_params() -> dict:
+    """加载自动进化学习到的策略参数, 文件不存在时返回空 dict (调用方使用默认值)"""
+    import json
+    path = os.path.join(config.DATA_ROOT, 'active_strategy_params.json')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
 def is_trading_time() -> bool:
     """判断当前是否在A股交易时间内（9:30-11:30, 13:00-15:00）"""
     now = datetime.now()
@@ -63,6 +74,11 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
             sell_signals: list  # 策略卖出信号
         }
     """
+    _ap = _load_active_params()
+    _ap_sell = _ap.get('sell_rule', {})
+    _ap_tp = _ap.get('take_profit', {})
+    _ap_hold = _ap.get('hold', {})
+
     default_stop = round(buy_price * (1 - config.STOP_LOSS_PCT), 2)
     default_target = round(buy_price * (1 + config.TAKE_PROFIT_PCT), 2)
     
@@ -198,7 +214,8 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
         # ================================================================
         # 预估持有天数 (与 ai_engine_v2 保持一致的逻辑)
         # ================================================================
-        target_multi = stop_multi * 1.8
+        _tp_factor = _ap_tp.get('target_multi_factor', 1.0)
+        target_multi = stop_multi * 1.8 * _tp_factor
         target_distance = atr_14 * target_multi
         daily_avg_move = atr_14 * 0.6 * (efficiency / 0.5)
         
@@ -207,6 +224,9 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
         else:
             est_hold_days = 10
         
+        _ehd_override = _ap_hold.get('est_hold_days_override')
+        if _ehd_override and isinstance(_ehd_override, (int, float)):
+            est_hold_days = float(_ehd_override)
         result['est_hold_days'] = round(float(est_hold_days), 1)
         
         # ================================================================
@@ -237,37 +257,40 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
         trailing_atr_multi = max(stop_multi * 0.8, 1.0)
         trailing_stop = round(high_since - atr_14 * trailing_atr_multi, 2)
         
-        if time_ratio <= 0.7:
-            # ---- 预测有效期内 (0~70%): 标准持有 ----
+        _p2 = _ap_hold.get('phase2_start', 0.7)
+        _p3 = _ap_hold.get('phase3_start', 1.0)
+        _p4 = _ap_hold.get('phase4_start', 1.5)
+        _tighten_factor = _ap_sell.get('time_decay_tighten_factor', 1.0)
+
+        if time_ratio <= _p2:
+            # ---- 预测有效期内: 标准持有 ----
             time_phase = 1
             phase_name = '价格主导'
             effective_stop = base_stop
             
-        elif time_ratio <= 1.0:
-            # ---- 接近有效期 (70~100%): 轻微收紧止损 ----
+        elif time_ratio <= _p3:
+            # ---- 接近有效期: 轻微收紧止损 ----
             time_phase = 2
             phase_name = '渐进收紧'
             
-            tighten_progress = (time_ratio - 0.7) / 0.3  # 0→1
+            tighten_progress = (time_ratio - _p2) / (_p3 - _p2)  # 0→1
             
             if is_profitable:
-                # 盈利: 止损向买入价方向上移 (锁定部分利润)
-                profit_lock = buy_price + (current_price - buy_price) * 0.2
+                profit_lock = buy_price + (current_price - buy_price) * 0.2 * _tighten_factor
                 effective_stop = base_stop + (profit_lock - base_stop) * tighten_progress
             else:
-                # 亏损: 止损只轻微收紧 (让价格自己说话)
-                tighten_target = base_stop + (current_price - base_stop) * 0.15
+                tighten_target = base_stop + (current_price - base_stop) * 0.15 * _tighten_factor
                 effective_stop = base_stop + (tighten_target - base_stop) * tighten_progress
             
             trailing_atr_multi = max(trailing_atr_multi * (1 - tighten_progress * 0.2), 0.8)
             trailing_stop = round(high_since - atr_14 * trailing_atr_multi, 2)
             
-        elif time_ratio <= 1.5:
-            # ---- 超过有效期 (100~150%): 止损进一步收紧, 但仍由价格决定 ----
+        elif time_ratio <= _p4:
+            # ---- 超过有效期: 止损进一步收紧, 但仍由价格决定 ----
             time_phase = 3
             phase_name = '止损收紧'
             
-            exceed_progress = (time_ratio - 1.0) / 0.5  # 0→1
+            exceed_progress = (time_ratio - _p3) / (_p4 - _p3)  # 0→1
             
             if is_profitable:
                 # 盈利: 止损上移到至少买入价(保本), 然后继续收紧
@@ -358,9 +381,9 @@ def check_single_position(stock_code: str, stock_name: str, buy_price: float,
                     urgency = max(urgency, 1)
                 else:
                     score_drop = ai_score_at_buy - ai_score_current
-                    drop_threshold = getattr(config, 'AI_SELL_SCORE_DROP', 15)
+                    drop_threshold = _ap_sell.get('ai_sell_score_drop', getattr(config, 'AI_SELL_SCORE_DROP', 15))
                     has_score_drop = score_drop >= drop_threshold
-                    has_multi_resonance = n_sell_sigs >= 2
+                    has_multi_resonance = n_sell_sigs >= _ap_sell.get('min_sell_resonance', 2)
                     score_info = f" (AI评分:{ai_score_at_buy:.0f}→{ai_score_current:.0f},降{score_drop:.0f}分)"
 
                     if has_multi_resonance or has_score_drop:

@@ -70,16 +70,16 @@ def run_daily_cycle() -> dict:
         except Exception as exc:
             logger.error("AI三层扫描失败: %s", exc, exc_info=True)
 
-        auto_trade_result = {"sell_actions": [], "buy_actions": [], "hold_alerts": [], "summary": ""}
+        auto_trade_result = {"sell_suggestions": [], "buy_suggestions": [], "hold_alerts": [], "summary": "", "plan_only": True}
         try:
-            logger.info("第2.5步: AI自动模拟交易...")
+            logger.info("第2.5步: 生成明日作战计划...")
             if ai_result.get("status") == "ok" and has_fresh_ai_scores():
-                auto_trade_result = execute_auto_trade(account, rescan=False)
+                auto_trade_result = execute_auto_trade(account, rescan=False, plan_only=True)
             else:
-                auto_trade_result["summary"] = "AI扫描未成功或评分未通过新鲜度校验，已跳过自动买入流程"
+                auto_trade_result["summary"] = "AI扫描未成功或评分未通过新鲜度校验，已跳过作战计划生成"
                 logger.warning(auto_trade_result["summary"])
         except Exception as exc:
-            logger.error("AI自动交易失败: %s", exc, exc_info=True)
+            logger.error("作战计划生成失败: %s", exc, exc_info=True)
 
         logger.info("第3步: 检查持仓卖出...")
         all_positions = check_all_manual_positions(account)
@@ -92,17 +92,28 @@ def run_daily_cycle() -> dict:
         if sentiment_text:
             body_parts.append(sentiment_text)
 
-        if auto_trade_result.get("sell_actions") or auto_trade_result.get("buy_actions"):
-            lines = ["\n🤖 AI自动交易报告\n" + "=" * 40]
-            for sa in auto_trade_result.get("sell_actions", []):
+        sell_sugs = auto_trade_result.get("sell_suggestions") or auto_trade_result.get("sell_actions", [])
+        buy_sugs = auto_trade_result.get("buy_suggestions") or auto_trade_result.get("buy_actions", [])
+        is_plan = auto_trade_result.get("plan_only", False)
+        if sell_sugs or buy_sugs:
+            title_label = "📋 明日作战计划" if is_plan else "🤖 AI自动交易报告"
+            lines = [f"\n{title_label}\n" + "=" * 40]
+            for ss in sell_sugs:
+                price = ss.get("price", 0)
+                pnl_pct = ss.get("pnl_pct", 0)
+                reason = ss.get("reason", "")[:50]
+                label = "建议卖出" if is_plan else "卖出"
+                pnl_info = f"盈亏{ss.get('pnl', 0):+,.0f}({pnl_pct:+.1f}%)" if not is_plan else f"{pnl_pct:+.1f}%"
                 lines.append(
-                    f"  卖出 {sa['stock_name']}({sa['stock_code']}) @{sa['price']:.2f} "
-                    f"盈亏{sa['pnl']:+,.0f}({sa['pnl_pct']:+.1f}%) | {sa['reason'][:50]}"
+                    f"  {label} {ss['stock_name']}({ss['stock_code']}) @{price:.2f} {pnl_info} | {reason}"
                 )
-            for ba in auto_trade_result.get("buy_actions", []):
+            for bs in buy_sugs:
+                price = bs.get("current_price", 0) or bs.get("price", 0)
+                ai_score = bs.get("ai_score", 0)
+                label = "建议买入" if is_plan else "买入"
                 lines.append(
-                    f"  买入 {ba['stock_name']}({ba['stock_code']}) @{ba['price']:.2f} "
-                    f"x{ba['shares']}股 AI={ba['ai_score']} 止损{ba['sell_stop']:.2f}"
+                    f"  {label} {bs['stock_name']}({bs['stock_code']}) 目标¥{price:.2f} "
+                    f"x{bs['shares']}股 AI={ai_score} 止损{bs.get('sell_stop', 0):.2f}"
                 )
             for ha in auto_trade_result.get("hold_alerts", []):
                 lines.append(

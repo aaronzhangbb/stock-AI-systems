@@ -90,6 +90,10 @@ class PerformanceAnalyzer:
                 pnl = (sell_price - buy_price) * matched_shares
                 pnl_pct = (sell_price - buy_price) / buy_price * 100 if buy_price > 0 else 0
 
+                hold_trading_days = max(int(np.busday_count(
+                    buy_dt.date(), sell_dt.date())), 1)
+                trade_amount = round(buy_price * matched_shares, 2)
+
                 trades.append({
                     'stock_code': code,
                     'stock_name': buy_lot.get('stock_name', ''),
@@ -101,6 +105,8 @@ class PerformanceAnalyzer:
                     'pnl': round(pnl, 2),
                     'pnl_pct': round(pnl_pct, 2),
                     'hold_days': hold_days,
+                    'hold_trading_days': hold_trading_days,
+                    'trade_amount': trade_amount,
                     'ai_score': buy_lot.get('ai_score', 0),
                     'sell_reason': row.get('reason', ''),
                     'stop_price': buy_lot.get('stop_price', 0),
@@ -352,6 +358,7 @@ class PerformanceAnalyzer:
         from src.data.data_fetcher import get_history_data
 
         results = []
+        _kline_cache: dict[str, pd.DataFrame] = {}
         for _, t in trades.iterrows():
             code = t['stock_code']
             sell_date = str(t['sell_date'])[:10]
@@ -360,7 +367,9 @@ class PerformanceAnalyzer:
                 continue
 
             try:
-                df = get_history_data(code, days=400, use_cache=True)
+                if code not in _kline_cache:
+                    _kline_cache[code] = get_history_data(code, days=400, use_cache=True)
+                df = _kline_cache[code]
                 if df.empty:
                     continue
 
@@ -376,10 +385,12 @@ class PerformanceAnalyzer:
                 if post_df.empty:
                     continue
 
+                post_3 = post_df.head(3)
                 post_5 = post_df.head(5)
                 post_10 = post_df.head(10)
                 post_20 = post_df.head(20)
 
+                post_3d_max = float(post_3['high'].max()) if not post_3.empty else sell_price
                 post_5d_max = float(post_5['high'].max()) if not post_5.empty else sell_price
                 post_10d_max = float(post_10['high'].max()) if not post_10.empty else sell_price
                 post_20d_max = float(post_20['high'].max()) if not post_20.empty else sell_price
@@ -387,28 +398,50 @@ class PerformanceAnalyzer:
                     float(post_df['close'].iloc[-1]) if not post_df.empty else sell_price
                 )
 
+                post_3d_max_pct = round((post_3d_max - sell_price) / sell_price * 100, 2)
                 post_5d_max_pct = round((post_5d_max - sell_price) / sell_price * 100, 2)
                 post_10d_max_pct = round((post_10d_max - sell_price) / sell_price * 100, 2)
                 post_20d_max_pct = round((post_20d_max - sell_price) / sell_price * 100, 2)
                 post_10d_close_pct = round((post_10d_close - sell_price) / sell_price * 100, 2)
 
-                if post_10d_max_pct >= 5:
-                    label = '卖早了'
-                elif t['pnl_pct'] < 0 and post_10d_close_pct < -2:
-                    label = '卖晚了'
-                elif post_10d_max_pct < 3:
-                    label = '卖对了'
+                sell_reason = t.get('sell_reason', '')
+                pnl_pct = t.get('pnl_pct', 0)
+
+                if '止损' in str(sell_reason) or '追踪止损' in str(sell_reason):
+                    if post_10d_close_pct < -1:
+                        label = '卖对了'
+                    elif post_5d_max_pct >= 5:
+                        label = '卖早了'
+                    elif pnl_pct < -8:
+                        label = '卖晚了'
+                    else:
+                        label = '待观察'
+                elif '止盈' in str(sell_reason):
+                    if post_10d_close_pct < 0:
+                        label = '卖对了'
+                    elif post_10d_max_pct >= 5:
+                        label = '卖早了'
+                    else:
+                        label = '待观察'
                 else:
-                    label = '待观察'
+                    if post_10d_max_pct >= 5:
+                        label = '卖早了'
+                    elif pnl_pct < 0 and post_10d_close_pct < -2:
+                        label = '卖晚了'
+                    elif post_10d_max_pct < 3:
+                        label = '卖对了'
+                    else:
+                        label = '待观察'
 
                 results.append({
                     'stock_code': code,
                     'stock_name': t.get('stock_name', ''),
                     'sell_date': sell_date,
                     'sell_price': sell_price,
-                    'sell_reason': t.get('sell_reason', ''),
-                    'pnl_pct': t.get('pnl_pct', 0),
+                    'sell_reason': sell_reason,
+                    'pnl_pct': pnl_pct,
                     'hold_days': t.get('hold_days', 0),
+                    'post_3d_max_pct': post_3d_max_pct,
                     'post_5d_max_pct': post_5d_max_pct,
                     'post_10d_max_pct': post_10d_max_pct,
                     'post_20d_max_pct': post_20d_max_pct,
@@ -421,9 +454,10 @@ class PerformanceAnalyzer:
 
         return pd.DataFrame(results) if results else pd.DataFrame()
 
-    def analyze_post_sell_by_reason(self) -> list:
-        """按卖出原因分组统计卖后表现"""
-        post_df = self.analyze_post_sell_performance()
+    def analyze_post_sell_by_reason(self, post_df: pd.DataFrame = None) -> list:
+        """按卖出原因分组统计卖后表现 (可传入已有 post_df 避免重复计算)"""
+        if post_df is None:
+            post_df = self.analyze_post_sell_performance()
         if post_df.empty:
             return []
 

@@ -141,6 +141,16 @@ ENABLE_HEAVY_MODEL = _env_bool("ENABLE_HEAVY_MODEL", "true")   # 是否启用重
 # ==================== 微信推送（PushPlus） ====================
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
 
+# ==================== 策略进化(学习器)参数 ====================
+LEARNER_RECENCY_WEIGHTS = [1.0, 0.6, 0.3]   # 近30天/30~90天/90+天 交易权重
+LEARNER_MIN_BUCKET_SIZE = 5                   # 分桶分析最小样本数
+SCAN_USE_LEARNED_PARAMS = _env_bool("SCAN_USE_LEARNED_PARAMS", "true")  # 扫描/交易是否使用学习参数
+
+# ==================== 自动进化参数 ====================
+AUTO_EVOLVE_ENABLED = _env_bool("AUTO_EVOLVE_ENABLED", "true")          # 是否启用自动参数进化
+AUTO_EVOLVE_MIN_IMPROVEMENT = _env_float("AUTO_EVOLVE_MIN_IMPROVEMENT", 0.05)  # 候选参数需至少提升 5%
+AUTO_EVOLVE_MIN_TRADES = _env_int("AUTO_EVOLVE_MIN_TRADES", 10)         # 反事实验证最少交易笔数
+
 # ==================== 盘中狙击参数 ====================
 SNIPER_ENABLED = _env_bool("SNIPER_ENABLED", "false")
 SNIPER_INTERVAL_SECONDS = _env_int("SNIPER_INTERVAL_SECONDS", 30)

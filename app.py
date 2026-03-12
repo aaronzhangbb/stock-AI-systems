@@ -1569,41 +1569,42 @@ elif page == "🎮 模拟交易":
     with trade_tabs[0]:
         from src.trading.auto_trader import AutoTrader
 
-        st.markdown("##### AI 一键执行交易决策")
+        st.markdown("##### AI 生成明日作战计划")
         st.markdown(f"""
 <div class="signal-card" style="padding:12px 16px;">
 <div style="color:#cbd5e1;font-size:13px;line-height:1.8;">
-<b>工作流程:</b> 重新AI扫描最新推荐 → 检查持仓卖出 → 筛选新标的买入<br>
+<b>工作流程:</b> AI扫描最新推荐 → 分析持仓生成卖出建议 → 筛选新标的生成买入建议 → 写入作战计划<br>
+<b>执行方式:</b> 盘后点击生成计划 → 明日盘中由狙击引擎根据实时价格自动执行<br>
 <b>当前参数:</b> 评分阈值≥{config.AUTO_SCORE_THRESHOLD} · 最大持仓{config.AUTO_MAX_POSITIONS}只 · Kelly仓位{'开启' if config.AUTO_USE_KELLY_SIZE else '关闭'}
 </div>
 </div>""", unsafe_allow_html=True)
 
         col_exec1, col_exec2 = st.columns([3, 1])
         with col_exec1:
-            if st.button("🤖 AI一键执行交易", type="primary", key="auto_exec", use_container_width=True):
-                status_container = st.status("AI自动交易引擎运行中...", expanded=True)
+            if st.button("📋 生成明日作战计划", type="primary", key="auto_exec", use_container_width=True):
+                status_container = st.status("AI作战计划生成中...", expanded=True)
                 exec_result = None
                 try:
                     with status_container:
                         def _on_progress(stage, msg):
-                            stage_icons = {'sell': '📤', 'scan': '🔍', 'buy': '📥', 'snapshot': '📸', 'done': '✅'}
+                            stage_icons = {'sell': '📤', 'scan': '🔍', 'buy': '📥', 'plan': '📋', 'snapshot': '📸', 'done': '✅'}
                             icon = stage_icons.get(stage, '⏳')
                             st.write(f"{icon} {msg}")
 
-                        exec_result = execute_auto_trade(account, rescan=True, progress_callback=_on_progress)
+                        exec_result = execute_auto_trade(account, rescan=True, plan_only=True, progress_callback=_on_progress)
 
                     status_container.update(label=exec_result['summary'], state="complete", expanded=False)
                     st.session_state['last_auto_result'] = exec_result
                 except Exception as e:
                     err_msg = str(e)
-                    status_container.update(label=f"执行失败: {err_msg[:80]}...", state="error", expanded=True)
+                    status_container.update(label=f"生成失败: {err_msg[:80]}...", state="error", expanded=True)
                     _err_result = build_auto_trade_error_result(err_msg)
                     st.session_state['last_auto_result'] = _err_result
                     try:
                         write_json_atomic(os.path.join(config.DATA_ROOT, 'last_auto_result.json'), _err_result)
                     except Exception as exc:
-                        logger.warning("保存自动交易错误结果失败: %s", exc)
-                    st.error(f"AI自动交易执行失败: {e}")
+                        logger.warning("保存作战计划错误结果失败: %s", exc)
+                    st.error(f"作战计划生成失败: {e}")
                 st.rerun()
         with col_exec2:
             auto_status = "开启" if config.AUTO_ENABLED else "关闭"
@@ -1643,7 +1644,7 @@ elif page == "🎮 模拟交易":
 <div style="color:#7a869a;font-size:11px;">仓位 {weight:.0f}%</div>
 </div>""", unsafe_allow_html=True)
         else:
-            st.info("暂无 AI 持仓。点击上方「AI一键执行交易」开始。")
+            st.info("暂无 AI 持仓。点击上方「生成明日作战计划」，盘中狙击引擎将自动执行。")
 
         # ===== AI 交易日志 =====
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
@@ -1662,7 +1663,7 @@ elif page == "🎮 模拟交易":
             display_df = display_df.rename(columns=col_names)
             st.dataframe(display_df, use_container_width=True, hide_index=True)
         else:
-            st.info("暂无自动交易记录。点击上方「AI一键执行交易」开始。")
+            st.info("暂无自动交易记录。点击上方「生成明日作战计划」开始。")
 
     # ---- TAB 2: 作战计划（盘中狙击） ----
     with trade_tabs[1]:
@@ -1672,18 +1673,28 @@ elif page == "🎮 模拟交易":
         st.markdown("""
 <div class="signal-card" style="padding:12px 16px;">
 <div style="color:#cbd5e1;font-size:13px;line-height:1.8;">
-<b>工作原理:</b> 盘后 AI 扫描生成明日作战计划 → 盘中狙击引擎每30秒检查实时价格 → 价格触碰目标区间自动执行模拟交易 → 微信实时通知<br>
+<b>工作原理:</b> 盘后点击「生成明日作战计划」 → 盘中狙击引擎每30秒检查实时价格 → 自动执行买卖 → 微信实时通知<br>
 <b>买入狙击:</b> 候选股价格落入 [建议买入价, 最高可接受价] 区间 → 自动买入<br>
-<b>卖出狙击:</b> 持仓股触碰止损价或止盈价 → 自动卖出
+<b>卖出狙击:</b> 盘后分析建议卖出的持仓，盘中经 position_monitor 实时复核后执行；同时监控止损/止盈价格
 </div>
 </div>""", unsafe_allow_html=True)
 
         plan_col1, plan_col2, plan_col3 = st.columns(3)
         with plan_col1:
             if st.button("🔄 生成/刷新作战计划", type="primary", key="gen_plan", use_container_width=True):
-                plan = generate_battle_plan(account)
-                st.success(f"作战计划已生成: 买入候选 {len(plan.get('buy_targets', []))} 只, 卖出监控 {len(plan.get('sell_targets', []))} 只")
-                st.rerun()
+                try:
+                    with st.spinner("正在生成作战计划..."):
+                        plan = generate_battle_plan(account)
+                    n_buy = len(plan.get('buy_targets', []))
+                    n_sell = len(plan.get('sell_targets', []))
+                    st.session_state['last_plan_gen'] = {
+                        'msg': f"作战计划已生成: 买入候选 {n_buy} 只, 卖出监控 {n_sell} 只",
+                        'at': datetime.now().strftime('%H:%M:%S'),
+                    }
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"生成失败: {e}")
+                    logger.exception("生成作战计划失败")
         with plan_col2:
             sniper_status = "已开启" if config.SNIPER_ENABLED else "未启用"
             sniper_color = "#5eba7d" if config.SNIPER_ENABLED else "#7a869a"
@@ -1693,6 +1704,11 @@ elif page == "🎮 模拟交易":
             wx_status = "已配置" if pushplus_ok else "未配置"
             wx_color = "#5eba7d" if pushplus_ok else "#e06060"
             st.markdown(f'<div class="signal-card" style="text-align:center;padding:8px;"><span style="color:#7a869a;">微信通知:</span> <span style="color:{wx_color};font-weight:700;">{wx_status}</span></div>', unsafe_allow_html=True)
+
+        # 持久化显示上次生成结果（避免 rerun 后提示消失）
+        if st.session_state.get("last_plan_gen"):
+            lg = st.session_state["last_plan_gen"]
+            st.success(f"✅ {lg.get('msg', '')} （{lg.get('at', '')}）")
 
         plan = load_battle_plan()
         if plan and plan.get("plan_date"):
@@ -1727,7 +1743,14 @@ elif page == "🎮 模拟交易":
                 st.markdown("##### 卖出狙击监控")
                 sell_rows = []
                 for t in sell_targets:
-                    status_icon = {"monitoring": "👁️监控中", "exited": "✅已退出"}.get(t.get("status", ""), t.get("status", ""))
+                    status_icon = {
+                        "monitoring": "👁️监控中",
+                        "pending_sell": "🔴建议卖出",
+                        "exited": "✅已退出",
+                    }.get(t.get("status", ""), t.get("status", ""))
+                    reason_text = t.get("sell_reason", "") or ""
+                    if len(reason_text) > 30:
+                        reason_text = reason_text[:30] + "..."
                     sell_rows.append({
                         "代码": t["stock_code"],
                         "名称": t.get("stock_name", ""),
@@ -1735,6 +1758,7 @@ elif page == "🎮 模拟交易":
                         "数量": f"{t['shares']}股",
                         "止损": f"¥{t['sell_stop']:.2f}",
                         "止盈": f"¥{t['sell_target']:.2f}",
+                        "原因": reason_text,
                         "状态": status_icon,
                     })
                 st.dataframe(pd.DataFrame(sell_rows), use_container_width=True, hide_index=True)
@@ -1909,38 +1933,120 @@ elif page == "🎮 模拟交易":
 <span style="color:#7a869a;margin-left:12px;">{gen_time}</span>
 </div>""", unsafe_allow_html=True)
 
-            # 洞察卡片
+            # 核心指标快照 (V2)
+            _snap = learn_result.get('metrics_snapshot', {})
+            if _snap:
+                _mc1, _mc2, _mc3, _mc4 = st.columns(4)
+                with _mc1:
+                    st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">胜率</div><div style="color:#5eba7d;font-size:18px;font-weight:700;">{_snap.get("win_rate", 0)}%</div></div>', unsafe_allow_html=True)
+                with _mc2:
+                    st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">盈亏比</div><div style="color:#5b8def;font-size:18px;font-weight:700;">{_snap.get("rr_ratio", 0)}:1</div></div>', unsafe_allow_html=True)
+                with _mc3:
+                    _pf = _snap.get("profit_factor", 0)
+                    _pf_str = f'{_pf}' if _pf < 50 else '∞'
+                    st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">利润因子</div><div style="color:#f0a050;font-size:18px;font-weight:700;">{_pf_str}</div></div>', unsafe_allow_html=True)
+                with _mc4:
+                    _tp = _snap.get("total_pnl", 0)
+                    _tp_c = '#5eba7d' if _tp >= 0 else '#e06060'
+                    st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">总盈亏</div><div style="color:{_tp_c};font-size:18px;font-weight:700;">¥{_tp:+,.0f}</div></div>', unsafe_allow_html=True)
+
+            # 洞察卡片 — 三段式决策面板
             insights = learn_result.get('insights', [])
-            for ins in insights:
+            _status_style = {
+                'up':    ('#5b8def', '上调'),
+                'down':  ('#5b8def', '下调'),
+                'keep':  ('#5eba7d', '维持'),
+                'watch': ('#f0a050', '关注'),
+                'good':  ('#5eba7d', '良好'),
+                'bad':   ('#e06060', '需优化'),
+            }
+            cat_colors = {
+                '评分阈值': '#5b8def', '止损精度': '#e06060', '止盈精度': '#5eba7d',
+                '持有时间': '#f0a050', '卖出时机': '#38bdf8', '整体评价': '#c084fc',
+                '仓位合理性': '#a78bfa',
+            }
+
+            for _i, ins in enumerate(insights):
                 conf_pct = int(ins.get('confidence', 0) * 100)
                 cat = ins.get('category', '')
-                cat_colors = {
-                    '评分阈值': '#5b8def', '止损精度': '#e06060', '止盈精度': '#5eba7d',
-                    '持有时间': '#f0a050', '卖出时机': '#38bdf8', '整体评价': '#c084fc',
-                }
                 border_c = cat_colors.get(cat, '#7a869a')
+                _st = ins.get('status', 'keep')
+                _st_color, _st_label = _status_style.get(_st, ('#7a869a', '—'))
+                _kv = ins.get('key_value', '')
 
                 st.markdown(f"""
-<div style="background:rgba(255,255,255,0.03);border-left:3px solid {border_c};border-radius:6px;padding:10px 14px;margin-bottom:8px;">
-<div style="display:flex;justify-content:space-between;">
-<span style="color:{border_c};font-weight:700;">{cat}</span>
-<span style="color:#7a869a;font-size:12px;">置信度 {conf_pct}%</span>
+<div style="background:rgba(255,255,255,0.03);border-left:3px solid {border_c};border-radius:6px;padding:10px 14px;margin-bottom:6px;">
+<div style="display:flex;align-items:center;justify-content:space-between;">
+  <div style="display:flex;align-items:center;gap:8px;">
+    <span style="color:{border_c};font-weight:700;font-size:14px;">{cat}</span>
+    <span style="background:{_st_color};color:#fff;border-radius:4px;padding:1px 8px;font-size:11px;font-weight:600;">{_st_label}</span>
+  </div>
+  <span style="font-size:18px;font-weight:700;color:#e2e8f0;">{_kv}</span>
+  <span style="color:#7a869a;font-size:12px;white-space:nowrap;">置信度 {conf_pct}%</span>
 </div>
-<div style="color:#cbd5e1;font-size:13px;margin-top:4px;">{ins.get('finding', '')}</div>
-<div style="color:#94a3b8;font-size:12px;margin-top:4px;">💡 {ins.get('suggestion', '')}</div>
+<div style="color:#94a3b8;font-size:12px;margin-top:4px;">{ins.get('suggestion', '')}</div>
 </div>""", unsafe_allow_html=True)
+                with st.expander(f"查看详情 — {cat}", expanded=(cat == '整体评价')):
+                    _finding = ins.get('finding', '')
+                    if cat == '整体评价':
+                        _meta = ins.get('metadata', {})
+                        _sections = []
 
-            # 最优参数
+                        _auto_list = _meta.get('auto_applied', [])
+                        if _auto_list:
+                            _items = ''.join(f'<div style="color:#5eba7d;font-size:13px;margin-left:12px;">- {x}</div>' for x in _auto_list)
+                            _sections.append(f'<div style="color:#5eba7d;font-weight:700;font-size:13px;margin-bottom:2px;">已自动执行:</div>{_items}')
+
+                        _learn_list = _meta.get('learning', [])
+                        if _learn_list:
+                            _items = ''.join(f'<div style="color:#f0a050;font-size:13px;margin-left:12px;">- {x}</div>' for x in _learn_list)
+                            _sections.append(f'<div style="color:#f0a050;font-weight:700;font-size:13px;margin-top:6px;margin-bottom:2px;">自动学习中:</div>{_items}')
+
+                        _need_list = _meta.get('need_data', [])
+                        if _need_list:
+                            _items = ''.join(f'<div style="color:#7a869a;font-size:13px;margin-left:12px;">- {x}</div>' for x in _need_list)
+                            _sections.append(f'<div style="color:#7a869a;font-weight:700;font-size:13px;margin-top:6px;margin-bottom:2px;">待积累数据:</div>{_items}')
+
+                        if _sections:
+                            st.markdown('\n'.join(_sections), unsafe_allow_html=True)
+                        else:
+                            st.markdown(f'<span style="color:#cbd5e1;font-size:13px;">{_finding}</span>', unsafe_allow_html=True)
+                    else:
+                        st.markdown(f'<span style="color:#cbd5e1;font-size:13px;">{_finding}</span>', unsafe_allow_html=True)
+
+            # 推荐参数 — 动作化表达
             opt = learn_result.get('optimal_params', {})
             if opt:
                 st.markdown("##### 推荐参数")
-                oc1, oc2, oc3 = st.columns(3)
+                _avg_hd = opt.get('avg_hold_days', '-')
+                _pos_map = opt.get('recommended_position_map', {})
+                _pos_str = ' / '.join([f'{k}:{int(v*100)}%' for k, v in _pos_map.items()]) if _pos_map else '默认'
+
+                _sl_action = '维持'
+                _tp_action = '维持'
+                for ins in insights:
+                    _meta = ins.get('metadata', {})
+                    if ins.get('category') == '止损精度':
+                        _a = _meta.get('recommended_action', 'maintain')
+                        _sl_action = {'loosen': '放宽', 'tighten': '收紧', 'maintain': '维持'}.get(_a, '维持')
+                    elif ins.get('category') == '止盈精度':
+                        _a = _meta.get('recommended_action', 'maintain')
+                        _tp_action = {'raise_target': '提高目标', 'maintain': '维持'}.get(_a, '维持')
+
+                _sl_color = '#f0a050' if _sl_action != '维持' else '#5eba7d'
+                _tp_color = '#f0a050' if _tp_action != '维持' else '#5eba7d'
+
+                oc1, oc2, oc3, oc4, oc5 = st.columns(5)
                 with oc1:
                     st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">推荐评分阈值</div><div style="color:#5b8def;font-size:20px;font-weight:700;">{opt.get("score_threshold", "-")}</div></div>', unsafe_allow_html=True)
                 with oc2:
-                    st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">止损触发率</div><div style="color:#e06060;font-size:20px;font-weight:700;">{opt.get("stop_trigger_rate", 0)}%</div></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">止损策略</div><div style="color:{_sl_color};font-size:20px;font-weight:700;">{_sl_action}</div></div>', unsafe_allow_html=True)
                 with oc3:
-                    st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">止盈触发率</div><div style="color:#5eba7d;font-size:20px;font-weight:700;">{opt.get("tp_trigger_rate", 0)}%</div></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">止盈策略</div><div style="color:{_tp_color};font-size:20px;font-weight:700;">{_tp_action}</div></div>', unsafe_allow_html=True)
+                with oc4:
+                    st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">平均持有期</div><div style="color:#f0a050;font-size:20px;font-weight:700;">{_avg_hd}天</div></div>', unsafe_allow_html=True)
+                with oc5:
+                    st.markdown(f'<div class="signal-card" style="text-align:center;"><div class="metric-label">推荐仓位</div><div style="color:#a78bfa;font-size:13px;font-weight:700;">{_pos_str}</div></div>', unsafe_allow_html=True)
 
         else:
             st.markdown("""
@@ -1961,7 +2067,7 @@ elif page == "🎮 模拟交易":
         if st.button("📊 分析卖后行情", key="run_post_sell"):
             with st.spinner("正在拉取卖后行情数据..."):
                 _post_df = _perf.analyze_post_sell_performance()
-                _by_reason = _perf.analyze_post_sell_by_reason()
+                _by_reason = _perf.analyze_post_sell_by_reason(post_df=_post_df)
             st.session_state['post_sell_df'] = _post_df
             st.session_state['post_sell_by_reason'] = _by_reason
 

@@ -22,6 +22,16 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _load_active_params() -> dict:
+    """加载自动进化学习到的策略参数"""
+    _ap_path = os.path.join(config.DATA_ROOT, 'active_strategy_params.json')
+    try:
+        with open(_ap_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
 # ============================================================
 # 特征工程 V2.0 — 100+ 高阶特征
 # ============================================================
@@ -901,8 +911,9 @@ class AIScorer:
             upside_factor = np.clip(vol_asym, 0.7, 2.0)  # 上行波动率优势
             momentum_factor = 1.0 + np.clip(mom_accel * 20, -0.3, 0.5)  # 动量加速调整
             
-            # 基础目标: ATR的倍数 (比止损倍数大, 确保盈亏比>1)
-            target_atr_multi = stop_atr_multi * 1.8 * upside_factor * momentum_factor
+            _ap = _load_active_params()
+            _tp_factor = _ap.get('take_profit', {}).get('target_multi_factor', 1.0)
+            target_atr_multi = stop_atr_multi * 1.8 * _tp_factor * upside_factor * momentum_factor
             target_atr_multi = np.clip(target_atr_multi, 2.0, 8.0)
             
             # 三级目标体系

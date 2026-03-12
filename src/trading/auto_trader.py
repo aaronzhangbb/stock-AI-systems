@@ -166,34 +166,26 @@ class AutoTrader:
                     logger.warning("逐只获取价格失败 %s: %s", code, exc)
         return prices
 
-    def execute(self, rescan: bool = False, progress_callback=None) -> dict:
+    def execute(self, rescan: bool = False, plan_only: bool = False, progress_callback=None) -> dict:
         """
         执行一轮完整的自动交易决策
 
         参数:
             rescan: 是否在卖出后重新运行AI扫描再买入 (默认False用已有推荐)
+            plan_only: True=仅分析并生成作战计划(不真实买卖), False=直接执行(后向兼容)
             progress_callback: 进度回调 fn(stage: str, message: str)
-                stage: 'sell' / 'scan' / 'buy' / 'snapshot' / 'done'
-
-        返回:
-            {
-                'sell_actions': [卖出操作列表],
-                'buy_actions': [买入操作列表],
-                'skipped': [跳过的候选],
-                'scan_result': {扫描结果摘要} or None,
-                'summary': '执行摘要文字',
-                'timestamp': '执行时间',
-            }
+                stage: 'sell' / 'scan' / 'buy' / 'plan' / 'snapshot' / 'done'
         """
         if not config.AUTO_ENABLED:
             return {
                 'sell_actions': [], 'buy_actions': [], 'hold_alerts': [], 'skipped': [],
-                'scan_result': None,
+                'sell_suggestions': [], 'buy_suggestions': [],
+                'scan_result': None, 'plan': None,
+                'plan_only': plan_only,
                 'summary': '自动交易已关闭 (AUTO_ENABLED=False)',
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
 
-        # 优先更新大盘情绪（确保侧边栏显示最新日期，不依赖后续扫描是否成功）
         try:
             from src.data.market_sentiment import get_market_sentiment
             get_market_sentiment(verbose=False)
@@ -205,18 +197,22 @@ class AutoTrader:
             if progress_callback:
                 progress_callback(stage, msg)
 
+        mode_label = "计划生成" if plan_only else "自动交易"
         logger.info("=" * 50)
-        logger.info("AI自动交易引擎启动 (rescan=%s)", rescan)
+        logger.info("AI%s引擎启动 (rescan=%s, plan_only=%s)", mode_label, rescan, plan_only)
         logger.info("=" * 50)
 
         sell_actions = []
         buy_actions = []
+        sell_suggestions = []
+        buy_suggestions = []
         hold_alerts = []
         skipped = []
         scan_result = None
+        plan = None
         can_buy = True
 
-        # ========== 第一步: AI扫描 (可选，确保卖出时用最新评分) ==========
+        # ========== 第一步: AI扫描 ==========
         if rescan:
             _progress('scan', '正在运行AI策略扫描，生成最新推荐 (耗时3~10分钟)...')
             scan_result = self._refresh_ai_scores()
@@ -226,52 +222,98 @@ class AutoTrader:
         else:
             can_buy = self._can_use_fresh_scores()
 
-        # ========== 第二步: 检查持仓, 决定卖出 (使用最新AI评分) ==========
-        _progress('sell', '正在检查持仓，执行止盈止损卖出...')
-        sell_actions, hold_alerts = self._execute_sells()
-        sold_codes = {a['stock_code'] for a in sell_actions}
-        _progress('sell', f'卖出完成: {len(sell_actions)}只')
+        # ========== 第二步: 检查持仓 ==========
+        if plan_only:
+            _progress('sell', '正在分析持仓，生成卖出建议...')
+            sell_suggestions, hold_alerts = self._execute_sells(dry_run=True)
+            suggested_sell_codes = {s['stock_code'] for s in sell_suggestions}
+            _progress('sell', f'分析完成: 建议卖出{len(sell_suggestions)}只')
+        else:
+            _progress('sell', '正在检查持仓，执行止盈止损卖出...')
+            sell_actions, hold_alerts = self._execute_sells(dry_run=False)
+            suggested_sell_codes = {a['stock_code'] for a in sell_actions}
+            _progress('sell', f'卖出完成: {len(sell_actions)}只')
 
-        # ========== 第三步: 筛选新标的, 决定买入 ==========
+        # ========== 第三步: 筛选买入标的 ==========
         if can_buy:
-            _progress('buy', '正在筛选标的，执行买入...')
-            buy_actions, skipped = self._execute_buys(exclude_codes=sold_codes)
-            _progress('buy', f'买入完成: {len(buy_actions)}只')
+            if plan_only:
+                _progress('buy', '正在筛选标的，生成买入建议...')
+                buy_suggestions, skipped = self._execute_buys(exclude_codes=suggested_sell_codes, dry_run=True)
+                _progress('buy', f'筛选完成: 建议买入{len(buy_suggestions)}只')
+            else:
+                _progress('buy', '正在筛选标的，执行买入...')
+                buy_actions, skipped = self._execute_buys(exclude_codes=suggested_sell_codes, dry_run=False)
+                _progress('buy', f'买入完成: {len(buy_actions)}只')
         else:
             skipped.append({'code': '', 'name': '', 'reason': 'AI评分未通过新鲜度校验，已跳过自动买入'})
             _progress('buy', 'AI评分未通过新鲜度校验，已跳过自动买入')
 
-        # ========== 第四步: 保存每日资产快照 ==========
-        _progress('snapshot', '保存资产快照...')
-        self._save_daily_snapshot()
+        # ========== 第四步: 生成作战计划 / 保存快照 ==========
+        if plan_only:
+            _progress('plan', '正在写入明日作战计划...')
+            try:
+                from src.services.sniper_service import generate_battle_plan
+                plan = generate_battle_plan(
+                    account=self.account,
+                    sell_suggestions=sell_suggestions,
+                    buy_suggestions=buy_suggestions,
+                )
+                n_buy_t = len(plan.get('buy_targets', []))
+                n_sell_t = len(plan.get('sell_targets', []))
+                _progress('plan', f'作战计划已生成: 买入候选{n_buy_t}只, 卖出监控{n_sell_t}只')
+            except Exception as exc:
+                logger.error("[计划] 写入作战计划失败: %s", exc, exc_info=True)
+                _progress('plan', f'作战计划写入失败: {exc}')
+        else:
+            _progress('snapshot', '保存资产快照...')
+            self._save_daily_snapshot()
 
         # ========== 汇总 ==========
-        n_sell = len(sell_actions)
-        n_buy = len(buy_actions)
-        total_sell_pnl = sum(a.get('pnl', 0) for a in sell_actions)
+        if plan_only:
+            n_sell_s = len(sell_suggestions)
+            n_buy_s = len(buy_suggestions)
+            summary_parts = []
+            if n_sell_s > 0:
+                summary_parts.append(f"建议卖出{n_sell_s}只")
+            if rescan:
+                summary_parts.append("已重新扫描")
+            if n_buy_s > 0:
+                summary_parts.append(f"建议买入{n_buy_s}只")
+            if not can_buy:
+                summary_parts.append("已跳过买入筛选")
+            if not summary_parts:
+                summary_parts.append("无建议")
+            summary = f"明日作战计划已生成: {', '.join(summary_parts)}"
+        else:
+            n_sell = len(sell_actions)
+            n_buy = len(buy_actions)
+            total_sell_pnl = sum(a.get('pnl', 0) for a in sell_actions)
+            summary_parts = []
+            if n_sell > 0:
+                summary_parts.append(f"卖出{n_sell}只(盈亏¥{total_sell_pnl:+,.0f})")
+            if rescan:
+                summary_parts.append("已重新扫描")
+            if n_buy > 0:
+                summary_parts.append(f"买入{n_buy}只")
+            if not can_buy:
+                summary_parts.append("已跳过自动买入")
+            if not summary_parts:
+                summary_parts.append("无操作")
+            summary = f"AI自动交易完成: {', '.join(summary_parts)}"
 
-        summary_parts = []
-        if n_sell > 0:
-            summary_parts.append(f"卖出{n_sell}只(盈亏¥{total_sell_pnl:+,.0f})")
-        if rescan:
-            summary_parts.append("已重新扫描")
-        if n_buy > 0:
-            summary_parts.append(f"买入{n_buy}只")
-        if not can_buy:
-            summary_parts.append("已跳过自动买入")
-        if not summary_parts:
-            summary_parts.append("无操作")
-
-        summary = f"AI自动交易完成: {', '.join(summary_parts)}"
         logger.info(summary)
         _progress('done', summary)
 
         return {
             'sell_actions': sell_actions,
             'buy_actions': buy_actions,
+            'sell_suggestions': sell_suggestions,
+            'buy_suggestions': buy_suggestions,
             'hold_alerts': hold_alerts,
             'skipped': skipped,
             'scan_result': scan_result,
+            'plan': plan,
+            'plan_only': plan_only,
             'run_id': self.run_id,
             'can_buy': can_buy,
             'summary': summary,
@@ -313,20 +355,23 @@ class AutoTrader:
             logger.warning("查询买入 AI 评分失败 %s: %s", stock_code, exc)
             return 0
 
-    def _execute_sells(self) -> tuple:
-        """检查持仓并执行卖出，返回 (sell_actions, hold_alerts)"""
-        sell_actions = []
+    def _execute_sells(self, dry_run: bool = False) -> tuple:
+        """
+        检查持仓并执行/分析卖出
+
+        参数:
+            dry_run: True=只分析生成建议(不执行account.sell), False=实际执行
+        返回: (sell_actions_or_suggestions, hold_alerts)
+        """
+        sell_items = []
         hold_alerts = []
         positions = self.account.get_positions()
 
         if positions.empty:
             logger.info("[卖出] 无持仓, 跳过")
-            return sell_actions, hold_alerts
+            return sell_items, hold_alerts
 
-        # 加载最新 AI 评分（用于技术面卖出确认）
         ai_scores_map = self._load_ai_scores_map()
-
-        # 批量获取实时价格
         codes = positions['stock_code'].tolist()
         rt_prices = self._get_current_prices(codes)
 
@@ -341,7 +386,6 @@ class AutoTrader:
                 logger.warning("[卖出] %s(%s) 无法获取价格, 跳过", name, code)
                 continue
 
-            # 使用 position_monitor 检查卖出条件
             buy_date = pos.get('created_at', datetime.now().strftime('%Y-%m-%d'))
             if isinstance(buy_date, str) and len(buy_date) > 10:
                 buy_date = buy_date[:10]
@@ -367,43 +411,61 @@ class AutoTrader:
 
             advice = result.get('advice', '继续持有')
             alerts = result.get('alerts', [])
-
-            # 根据配置决定卖出紧急度
             should_sell = should_execute_sell_advice(advice)
 
             if should_sell:
                 reason = '; '.join(alerts) if alerts else advice
-                sell_result = self.account.sell(code, name, current_price, shares)
+                pnl_pct_est = round((current_price - avg_cost) / avg_cost * 100, 2) if avg_cost > 0 else 0
 
-                if sell_result.get('success'):
-                    pnl = sell_result.get('profit', 0)
-                    pnl_pct = sell_result.get('profit_pct', 0)
-
-                    action_info = {
+                if dry_run:
+                    sell_items.append({
                         'stock_code': code,
                         'stock_name': name,
                         'price': current_price,
-                        'shares': shares,
-                        'reason': reason,
-                        'pnl': round(pnl, 2),
-                        'pnl_pct': round(pnl_pct, 2),
+                        'shares': int(shares),
                         'avg_cost': avg_cost,
+                        'reason': reason,
+                        'advice': advice,
+                        'alerts': alerts,
+                        'should_sell': True,
+                        'pnl_pct': pnl_pct_est,
+                        'sell_stop': result.get('stop_price', 0),
+                        'sell_target': result.get('target_price', 0),
                         'time_phase': result.get('time_phase_name', ''),
-                    }
-                    sell_actions.append(action_info)
-
-                    self._log_trade(
-                        action='卖出', stock_code=code, stock_name=name,
-                        price=current_price, shares=shares, reason=reason,
-                        stop_price=result.get('stop_price', 0),
-                        target_price=result.get('target_price', 0),
-                        pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 2),
-                        trade_id=sell_result.get('trade_id', 0),
-                    )
-                    logger.info("[卖出] %s(%s) @%.2f %d股, 盈亏%.2f(%.1f%%), 原因: %s",
-                                name, code, current_price, shares, pnl, pnl_pct, reason)
+                        'buy_date': buy_date,
+                        'ai_score_buy': ai_score_buy,
+                        'ai_score_now': ai_score_now,
+                    })
+                    logger.info("[建议卖出] %s(%s) @%.2f %d股, 预估%.1f%%, 原因: %s",
+                                name, code, current_price, shares, pnl_pct_est, reason)
                 else:
-                    logger.error("[卖出] %s(%s) 失败: %s", name, code, sell_result.get('message'))
+                    sell_result = self.account.sell(code, name, current_price, shares)
+                    if sell_result.get('success'):
+                        pnl = sell_result.get('profit', 0)
+                        pnl_pct = sell_result.get('profit_pct', 0)
+                        sell_items.append({
+                            'stock_code': code,
+                            'stock_name': name,
+                            'price': current_price,
+                            'shares': shares,
+                            'reason': reason,
+                            'pnl': round(pnl, 2),
+                            'pnl_pct': round(pnl_pct, 2),
+                            'avg_cost': avg_cost,
+                            'time_phase': result.get('time_phase_name', ''),
+                        })
+                        self._log_trade(
+                            action='卖出', stock_code=code, stock_name=name,
+                            price=current_price, shares=shares, reason=reason,
+                            stop_price=result.get('stop_price', 0),
+                            target_price=result.get('target_price', 0),
+                            pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 2),
+                            trade_id=sell_result.get('trade_id', 0),
+                        )
+                        logger.info("[卖出] %s(%s) @%.2f %d股, 盈亏%.2f(%.1f%%), 原因: %s",
+                                    name, code, current_price, shares, pnl, pnl_pct, reason)
+                    else:
+                        logger.error("[卖出] %s(%s) 失败: %s", name, code, sell_result.get('message'))
             else:
                 if alerts:
                     logger.info("[持有] %s(%s) 价格%.2f, 提示: %s",
@@ -420,42 +482,57 @@ class AutoTrader:
                         'ai_score_current': result.get('ai_score_current', 0),
                     })
 
-        return sell_actions, hold_alerts
+        return sell_items, hold_alerts
 
-    def _execute_buys(self, exclude_codes: set = None) -> tuple:
+    def _execute_buys(self, exclude_codes: set = None, dry_run: bool = False) -> tuple:
         """
-        筛选标的并执行买入
+        筛选标的并执行/分析买入
 
         参数:
-            exclude_codes: 需要排除的股票代码集合 (如刚卖出的股票，防止立即回买)
+            exclude_codes: 需要排除的股票代码集合
+            dry_run: True=只分析生成建议(不执行account.buy), False=实际执行
+        返回: (buy_actions_or_suggestions, skipped)
         """
-        buy_actions = []
+        buy_items = []
         skipped = []
         exclude_codes = exclude_codes or set()
 
-        # 当前持仓数
         positions = self.account.get_positions()
         current_count = len(positions)
         available_slots = config.AUTO_MAX_POSITIONS - current_count
 
+        if dry_run:
+            available_slots += len(exclude_codes)
+
         if available_slots <= 0:
             logger.info("[买入] 持仓已满(%d/%d), 跳过",
                         current_count, config.AUTO_MAX_POSITIONS)
-            return buy_actions, skipped
+            return buy_items, skipped
 
-        # 已持仓代码 + 刚卖出的代码 (避免重复买入/立即回买)
         held_codes = set(positions['stock_code'].tolist()) if not positions.empty else set()
         blocked_codes = held_codes | exclude_codes
         if exclude_codes:
             logger.info("[买入] 排除刚卖出的 %d 只股票, 防止立即回买", len(exclude_codes))
 
-        # 加载AI推荐
         recommendations = self._load_ai_recommendations()
         if not recommendations:
             logger.info("[买入] 无AI推荐数据, 跳过")
-            return buy_actions, skipped
+            return buy_items, skipped
 
-        # 筛选候选 (优先使用三层融合的 final_score，与「0.5×XGB+0.3×形态+0.2×Transformer」一致)
+        effective_threshold = config.AUTO_SCORE_THRESHOLD
+        if getattr(config, 'SCAN_USE_LEARNED_PARAMS', True):
+            try:
+                insights_path = os.path.join(DATA_DIR, 'strategy_insights.json')
+                _learned = load_json_safe(insights_path, default={}, log_prefix='策略学习')
+                if _learned and _learned.get('status') == 'ok':
+                    _lt = _learned.get('optimal_params', {}).get('score_threshold')
+                    if _lt and isinstance(_lt, (int, float)) and _lt >= 60:
+                        effective_threshold = int(_lt)
+                        logger.info("[买入] 使用策略学习阈值: %d (config默认: %d)",
+                                    effective_threshold, config.AUTO_SCORE_THRESHOLD)
+            except Exception:
+                pass
+
         candidates = []
         for rec in recommendations:
             code = rec.get('stock_code', '')
@@ -463,10 +540,9 @@ class AutoTrader:
             buy_upper = rec.get('buy_upper', 0)
             buy_price = rec.get('buy_price', 0)
 
-            # 过滤条件
             if code in blocked_codes:
                 continue
-            if score < config.AUTO_SCORE_THRESHOLD:
+            if score < effective_threshold:
                 continue
             if buy_upper <= 0 or buy_price <= 0:
                 continue
@@ -488,17 +564,13 @@ class AutoTrader:
             })
 
         if not candidates:
-            logger.info("[买入] 无符合条件的候选 (阈值: score>=%d)", config.AUTO_SCORE_THRESHOLD)
-            return buy_actions, skipped
+            logger.info("[买入] 无符合条件的候选 (阈值: score>=%d)", effective_threshold)
+            return buy_items, skipped
 
-        # 按评分排序
         candidates.sort(key=lambda x: x['score'], reverse=True)
-
-        # 批量获取当前价格 (先获取再过滤价格不合适的)
         cand_codes = [c['code'] for c in candidates]
         rt_prices = self._get_current_prices(cand_codes)
 
-        # 过滤掉价格不可用或超过上限的
         valid_candidates = []
         for cand in candidates:
             code = cand['code']
@@ -516,21 +588,17 @@ class AutoTrader:
             valid_candidates.append(cand)
 
         if not valid_candidates:
-            return buy_actions, skipped
+            return buy_items, skipped
 
-        # 限制在可用空位数内
         valid_candidates = valid_candidates[:available_slots]
         n_to_buy = len(valid_candidates)
 
         account_info = self.account.get_account_info()
         available_cash = account_info['cash']
 
-        # 仓位分配策略:
-        # 候选 <= 10 只: 用 Kelly 仓位 (精选重仓)
-        # 候选 > 10 只: 等权分配 (分散验证)
         use_equal_weight = (n_to_buy > 10)
         if use_equal_weight:
-            per_stock_amount = available_cash * 0.98 / n_to_buy  # 留2%缓冲
+            per_stock_amount = available_cash * 0.98 / n_to_buy
             logger.info("[买入] 等权分配模式: %d只, 每只约¥%.0f", n_to_buy, per_stock_amount)
 
         for cand in valid_candidates:
@@ -538,7 +606,6 @@ class AutoTrader:
             name = cand['name']
             current_price = cand['current_price']
 
-            # 计算买入股数
             if use_equal_weight:
                 target_amount = min(per_stock_amount, available_cash * 0.95)
             elif config.AUTO_USE_KELLY_SIZE:
@@ -558,56 +625,72 @@ class AutoTrader:
                 })
                 continue
 
-            # 执行买入
-            buy_result = self.account.buy(code, name, current_price, shares)
-
-            if buy_result.get('success'):
-                cost = buy_result.get('cost', current_price * shares)
-                available_cash -= cost
-
-                action_info = {
+            if dry_run:
+                est_cost = round(current_price * shares, 2)
+                available_cash -= est_cost
+                buy_items.append({
                     'stock_code': code,
                     'stock_name': name,
-                    'price': current_price,
+                    'current_price': current_price,
                     'shares': shares,
-                    'cost': round(cost, 2),
+                    'est_cost': est_cost,
                     'ai_score': cand['score'],
-                    'sell_target': cand['sell_target'],
-                    'sell_stop': cand['sell_stop'],
-                    'position_pct': cand['position_pct'],
-                    'risk_reward': cand['risk_reward'],
-                }
-                buy_actions.append(action_info)
-
-                advice_json = json.dumps({
                     'buy_price': cand['buy_price'],
                     'buy_upper': cand['buy_upper'],
                     'sell_target': cand['sell_target'],
                     'sell_stop': cand['sell_stop'],
+                    'position_pct': cand['position_pct'],
+                    'risk_reward': cand['risk_reward'],
                     'hold_days': cand['hold_days'],
-                    'exit_rules': cand['exit_rules'],
-                }, ensure_ascii=False)
-
-                self._log_trade(
-                    action='买入', stock_code=code, stock_name=name,
-                    price=current_price, shares=shares,
-                    reason=f"AI评分{cand['score']}, 盈亏比{cand['risk_reward']:.1f}",
-                    ai_score=cand['score'],
-                    stop_price=cand['sell_stop'],
-                    target_price=cand['sell_target'],
-                    advice_json=advice_json,
-                    trade_id=buy_result.get('trade_id', 0),
-                )
-                logger.info("[买入] %s(%s) @%.2f %d股, AI=%s, 止损=%.2f, 目标=%.2f",
-                            name, code, current_price, shares,
-                            cand['score'], cand['sell_stop'], cand['sell_target'])
-            else:
-                skipped.append({
-                    'code': code, 'name': name,
-                    'reason': buy_result.get('message', '买入失败')
                 })
+                logger.info("[建议买入] %s(%s) 目标区间[%.2f, %.2f], AI=%s, 盈亏比%.1f",
+                            name, code, cand['buy_price'], cand['buy_upper'],
+                            cand['score'], cand['risk_reward'])
+            else:
+                buy_result = self.account.buy(code, name, current_price, shares)
+                if buy_result.get('success'):
+                    cost = buy_result.get('cost', current_price * shares)
+                    available_cash -= cost
+                    buy_items.append({
+                        'stock_code': code,
+                        'stock_name': name,
+                        'price': current_price,
+                        'shares': shares,
+                        'cost': round(cost, 2),
+                        'ai_score': cand['score'],
+                        'sell_target': cand['sell_target'],
+                        'sell_stop': cand['sell_stop'],
+                        'position_pct': cand['position_pct'],
+                        'risk_reward': cand['risk_reward'],
+                    })
+                    advice_json = json.dumps({
+                        'buy_price': cand['buy_price'],
+                        'buy_upper': cand['buy_upper'],
+                        'sell_target': cand['sell_target'],
+                        'sell_stop': cand['sell_stop'],
+                        'hold_days': cand['hold_days'],
+                        'exit_rules': cand['exit_rules'],
+                    }, ensure_ascii=False)
+                    self._log_trade(
+                        action='买入', stock_code=code, stock_name=name,
+                        price=current_price, shares=shares,
+                        reason=f"AI评分{cand['score']}, 盈亏比{cand['risk_reward']:.1f}",
+                        ai_score=cand['score'],
+                        stop_price=cand['sell_stop'],
+                        target_price=cand['sell_target'],
+                        advice_json=advice_json,
+                        trade_id=buy_result.get('trade_id', 0),
+                    )
+                    logger.info("[买入] %s(%s) @%.2f %d股, AI=%s, 止损=%.2f, 目标=%.2f",
+                                name, code, current_price, shares,
+                                cand['score'], cand['sell_stop'], cand['sell_target'])
+                else:
+                    skipped.append({
+                        'code': code, 'name': name,
+                        'reason': buy_result.get('message', '买入失败')
+                    })
 
-        return buy_actions, skipped
+        return buy_items, skipped
 
     def _save_daily_snapshot(self):
         """保存每日资产快照"""
