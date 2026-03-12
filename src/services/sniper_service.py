@@ -27,7 +27,7 @@ from src.trading.paper_trading import PaperTradingAccount
 from src.trading.position_monitor import is_trading_time
 from src.trading.decision_kernel import calc_a_share_lot_shares
 from src.utils.state_store import load_json_safe, write_json_atomic
-from src.utils.wechat_notifier import send_notification
+from src.utils.wechat_notifier import send_notification, format_buy_html, format_sell_html
 
 logger = logging.getLogger(__name__)
 
@@ -200,15 +200,12 @@ def run_sniper_cycle(account: PaperTradingAccount, plan: dict) -> dict:
                 _append_sniper_log(entry)
 
                 title = f"[狙击买入] {target['stock_name']}({code}) @{price:.2f}"
-                body = (
-                    f"股票: {target['stock_name']}({code})\n"
-                    f"成交价: {price:.2f} × {shares}股\n"
-                    f"AI评分: {target.get('ai_score', '-')}\n"
-                    f"目标区间: [{buy_lower:.2f}, {buy_upper:.2f}]\n"
-                    f"止盈: {target.get('sell_target', '-')} 止损: {target.get('sell_stop', '-')}\n"
-                    f"时间: {now_str}"
+                body = format_buy_html(
+                    target["stock_name"], code, price, shares,
+                    target.get("ai_score", 0), buy_lower, buy_upper,
+                    target.get("sell_target", 0), target.get("sell_stop", 0), now_str,
                 )
-                send_notification(title, body)
+                send_notification(title, body, template="html")
                 logger.info("[狙击买入] %s @%.2f %d股", code, price, shares)
 
     # 卖出狙击
@@ -247,14 +244,11 @@ def run_sniper_cycle(account: PaperTradingAccount, plan: dict) -> dict:
                 _append_sniper_log(entry)
 
                 title = f"[狙击卖出] {target.get('stock_name', '')}({code}) @{price:.2f} {pnl_pct:+.1f}%"
-                body = (
-                    f"股票: {target.get('stock_name', '')}({code})\n"
-                    f"卖出价: {price:.2f} × {shares}股\n"
-                    f"盈亏: ¥{pnl:+,.0f} ({pnl_pct:+.1f}%)\n"
-                    f"触发: {trigger_reason}\n"
-                    f"时间: {now_str}"
+                body = format_sell_html(
+                    target.get("stock_name", ""), code, price, shares,
+                    pnl, pnl_pct, trigger_reason, now_str,
                 )
-                send_notification(title, body)
+                send_notification(title, body, template="html")
                 logger.info("[狙击卖出] %s @%.2f %s", code, price, trigger_reason)
 
     write_json_atomic(PLAN_PATH, plan)
