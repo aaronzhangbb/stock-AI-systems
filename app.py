@@ -1561,9 +1561,9 @@ elif page == "🎮 模拟交易":
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
     # ============================================================
-    # 4个标签页
+    # 5个标签页
     # ============================================================
-    trade_tabs = st.tabs(["🤖 AI自动交易", "📊 绩效仪表盘", "🧬 策略进化", "🔄 手动买卖"])
+    trade_tabs = st.tabs(["🤖 AI自动交易", "🎯 作战计划", "📊 绩效仪表盘", "🧬 策略进化", "🔄 手动买卖"])
 
     # ---- TAB 1: AI 自动交易 ----
     with trade_tabs[0]:
@@ -1664,8 +1664,118 @@ elif page == "🎮 模拟交易":
         else:
             st.info("暂无自动交易记录。点击上方「AI一键执行交易」开始。")
 
-    # ---- TAB 2: 绩效仪表盘 ----
+    # ---- TAB 2: 作战计划（盘中狙击） ----
     with trade_tabs[1]:
+        from src.services.sniper_service import generate_battle_plan, load_battle_plan, SNIPER_LOG_PATH
+
+        st.markdown("##### 🎯 今日作战计划")
+        st.markdown("""
+<div class="signal-card" style="padding:12px 16px;">
+<div style="color:#cbd5e1;font-size:13px;line-height:1.8;">
+<b>工作原理:</b> 盘后 AI 扫描生成明日作战计划 → 盘中狙击引擎每30秒检查实时价格 → 价格触碰目标区间自动执行模拟交易 → 微信实时通知<br>
+<b>买入狙击:</b> 候选股价格落入 [建议买入价, 最高可接受价] 区间 → 自动买入<br>
+<b>卖出狙击:</b> 持仓股触碰止损价或止盈价 → 自动卖出
+</div>
+</div>""", unsafe_allow_html=True)
+
+        plan_col1, plan_col2, plan_col3 = st.columns(3)
+        with plan_col1:
+            if st.button("🔄 生成/刷新作战计划", type="primary", key="gen_plan", use_container_width=True):
+                plan = generate_battle_plan(account)
+                st.success(f"作战计划已生成: 买入候选 {len(plan.get('buy_targets', []))} 只, 卖出监控 {len(plan.get('sell_targets', []))} 只")
+                st.rerun()
+        with plan_col2:
+            sniper_status = "已开启" if config.SNIPER_ENABLED else "未启用"
+            sniper_color = "#5eba7d" if config.SNIPER_ENABLED else "#7a869a"
+            st.markdown(f'<div class="signal-card" style="text-align:center;padding:8px;"><span style="color:#7a869a;">狙击引擎:</span> <span style="color:{sniper_color};font-weight:700;">{sniper_status}</span></div>', unsafe_allow_html=True)
+        with plan_col3:
+            pushplus_ok = bool(config.PUSHPLUS_TOKEN)
+            wx_status = "已配置" if pushplus_ok else "未配置"
+            wx_color = "#5eba7d" if pushplus_ok else "#e06060"
+            st.markdown(f'<div class="signal-card" style="text-align:center;padding:8px;"><span style="color:#7a869a;">微信通知:</span> <span style="color:{wx_color};font-weight:700;">{wx_status}</span></div>', unsafe_allow_html=True)
+
+        plan = load_battle_plan()
+        if plan and plan.get("plan_date"):
+            st.markdown(f'<span style="color:#7a869a;font-size:12px;">计划日期: {plan["plan_date"]} · 生成时间: {plan.get("generated_at", "")}</span>', unsafe_allow_html=True)
+
+            # 买入候选
+            buy_targets = plan.get("buy_targets", [])
+            if buy_targets:
+                st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+                st.markdown("##### 买入狙击候选")
+                buy_rows = []
+                for t in buy_targets:
+                    status_icon = {"waiting": "⏳等待", "filled": "✅已成交"}.get(t.get("status", ""), t.get("status", ""))
+                    buy_rows.append({
+                        "代码": t["stock_code"],
+                        "名称": t.get("stock_name", ""),
+                        "AI评分": t.get("ai_score", ""),
+                        "目标买入": f"¥{t['buy_price']:.2f}",
+                        "最高可接受": f"¥{t['buy_upper']:.2f}",
+                        "止盈": f"¥{t['sell_target']:.2f}" if t.get("sell_target") else "-",
+                        "止损": f"¥{t['sell_stop']:.2f}" if t.get("sell_stop") else "-",
+                        "状态": status_icon,
+                    })
+                st.dataframe(pd.DataFrame(buy_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("暂无买入候选。请先运行 AI 扫描后再生成作战计划。")
+
+            # 卖出监控
+            sell_targets = plan.get("sell_targets", [])
+            if sell_targets:
+                st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+                st.markdown("##### 卖出狙击监控")
+                sell_rows = []
+                for t in sell_targets:
+                    status_icon = {"monitoring": "👁️监控中", "exited": "✅已退出"}.get(t.get("status", ""), t.get("status", ""))
+                    sell_rows.append({
+                        "代码": t["stock_code"],
+                        "名称": t.get("stock_name", ""),
+                        "成本": f"¥{t['avg_cost']:.2f}",
+                        "数量": f"{t['shares']}股",
+                        "止损": f"¥{t['sell_stop']:.2f}",
+                        "止盈": f"¥{t['sell_target']:.2f}",
+                        "状态": status_icon,
+                    })
+                st.dataframe(pd.DataFrame(sell_rows), use_container_width=True, hide_index=True)
+
+            # 今日狙击记录
+            sniper_logs = load_json_safe(SNIPER_LOG_PATH, default=[], log_prefix="狙击日志")
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            today_logs = [l for l in sniper_logs if isinstance(l, dict) and l.get("time", "").startswith(today_str)]
+            if today_logs:
+                st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+                st.markdown("##### 今日狙击触发记录")
+                for log_entry in reversed(today_logs[-20:]):
+                    action = log_entry.get("action", "")
+                    color = "#5eba7d" if action == "买入" else "#e06060"
+                    pnl_info = ""
+                    if action == "卖出":
+                        pnl_info = f" 盈亏{log_entry.get('pnl', 0):+,.0f}({log_entry.get('pnl_pct', 0):+.1f}%)"
+                    st.markdown(f"""
+<div style="background:rgba(91,141,239,0.04);border-left:3px solid {color};border-radius:6px;padding:6px 12px;margin-bottom:4px;">
+<span style="color:{color};font-weight:700;">{action}</span>
+<b style="color:#e2e8f0;margin-left:8px;">{log_entry.get('stock_name', '')}({log_entry.get('stock_code', '')})</b>
+<span style="color:#7a869a;margin-left:8px;">@{log_entry.get('price', 0):.2f}</span>
+<span style="color:#94a3b8;margin-left:8px;">{pnl_info}</span>
+<br><span style="color:#7a869a;font-size:11px;">{log_entry.get('trigger', '')} · {log_entry.get('time', '')}</span>
+</div>""", unsafe_allow_html=True)
+
+        else:
+            st.info("暂无作战计划。点击上方「生成/刷新作战计划」按钮创建。")
+
+        if not config.SNIPER_ENABLED:
+            st.markdown("""
+<div class="signal-card-warn" style="padding:12px 16px;margin-top:12px;">
+<div style="color:#d4a74e;font-size:13px;">
+<b>狙击引擎未启用</b><br>
+在 <code>.env</code> 中设置 <code>SNIPER_ENABLED=true</code>，然后在服务器上运行 <code>python run_sniper.py</code> 即可开启盘中自动狙击。<br>
+微信通知: 在 <code>.env</code> 中设置 <code>PUSHPLUS_TOKEN=你的token</code>（从 pushplus.plus 获取）
+</div>
+</div>""", unsafe_allow_html=True)
+
+    # ---- TAB 3: 绩效仪表盘 ----
+    with trade_tabs[2]:
         from src.trading.performance import PerformanceAnalyzer
         perf = PerformanceAnalyzer()
         metrics = perf.compute_basic_metrics()
@@ -1767,8 +1877,8 @@ elif page == "🎮 模拟交易":
 </div>
 </div>""", unsafe_allow_html=True)
 
-    # ---- TAB 3: 策略进化 ----
-    with trade_tabs[2]:
+    # ---- TAB 4: 策略进化 ----
+    with trade_tabs[3]:
         from src.trading.strategy_learner import StrategyLearner
         learner = StrategyLearner()
 
@@ -1918,8 +2028,8 @@ elif page == "🎮 模拟交易":
 <div style="color:#7a869a;font-size:13px;margin-top:6px;">将追踪每笔卖出后 5/10/20 天的股价表现</div>
 </div>""", unsafe_allow_html=True)
 
-    # ---- TAB 4: 手动买卖 ----
-    with trade_tabs[3]:
+    # ---- TAB 5: 手动买卖 ----
+    with trade_tabs[4]:
         st.markdown("##### 手动模拟买卖")
         stock_code_t = st.text_input("股票代码", value="", max_chars=6, key="trade_code", placeholder="输入6位代码")
         if stock_code_t and len(stock_code_t) == 6:
