@@ -124,6 +124,49 @@ python daily_job.py
 
 现在可以直接根据脚本所在目录运行，更适合双机开发。
 
+### 3.6 盘中狙击引擎 + 作战计划
+
+新增了**盘中自动狙击**功能，解决"收盘后才执行导致错过盘中买卖时机"的问题：
+
+**工作流程：**
+
+```text
+盘后（15:30）: AI扫描 → 生成作战计划 (battle_plan.json)
+  ├── 买入候选: 目标买入价、最高可接受价、止损止盈
+  └── 卖出监控: 当前持仓的止损/止盈条件
+
+盘中（09:30-15:00）: 狙击引擎每30秒检查实时价格
+  ├── 买入狙击: 价格落入 [buy_price, buy_upper] → 自动模拟买入
+  ├── 卖出狙击: 触碰止损/止盈 → 自动模拟卖出
+  └── 每次触发 → 微信实时通知
+```
+
+**前端位置：** 模拟交易 → 作战计划 Tab
+
+**启用方式：** 在 `.env` 中配置：
+
+```env
+SNIPER_ENABLED=true
+SNIPER_INTERVAL_SECONDS=30
+PUSHPLUS_TOKEN=你的token
+```
+
+然后在服务器上运行：
+
+```bash
+python run_sniper.py
+```
+
+### 3.7 微信通知（PushPlus）
+
+新增微信推送通道，与邮件通知并行：
+
+1. 访问 https://www.pushplus.plus/ 用微信扫码登录
+2. 复制你的 Token
+3. 在 `.env` 中设置 `PUSHPLUS_TOKEN=你的token`
+
+当狙击引擎触发买入/卖出时，会同时通过邮件和微信推送通知。
+
 ---
 
 ## 4. 日常开发（已有环境）
@@ -174,6 +217,7 @@ stock-AI-systems/
 ├── app.py                    # Streamlit 主界面入口
 ├── config.py                 # 全局配置（优先读 .env 环境变量）
 ├── daily_job.py              # 每日收盘任务（缓存更新 + AI扫描 + 邮件推送）
+├── run_sniper.py             # 盘中狙击引擎启动脚本
 ├── retrain_all.py            # 三层模型重训练
 ├── start.bat                 # 一键启动脚本
 ├── requirements.txt          # Python 依赖清单
@@ -187,10 +231,10 @@ stock-AI-systems/
 │   ├── data/                 # 数据获取、缓存、情绪、板块
 │   ├── strategy/             # AI策略、扫描、模式识别
 │   ├── trading/              # 模拟交易、持仓监控、绩效、策略学习
-│   ├── services/             # 统一服务层（扫描/自动交易/每日任务）
+│   ├── services/             # 统一服务层（扫描/自动交易/每日任务/狙击引擎）
 │   ├── ui/                   # 前端渲染辅助模块
 │   ├── backtest/             # 回测系统
-│   └── utils/                # 通知、原子写入、运行锁、DB工具
+│   └── utils/                # 通知(邮件+微信)、原子写入、运行锁、DB工具
 │
 ├── data/                     # 运行数据目录（不提交 Git，自动生成）
 │   ├── trading.db            # 模拟交易数据库
@@ -198,6 +242,8 @@ stock-AI-systems/
 │   ├── stock_pool.db         # 股票池
 │   ├── ai_daily_scores.json  # AI评分
 │   ├── market_sentiment.json # 市场情绪
+│   ├── battle_plan.json      # 盘中作战计划
+│   ├── sniper_log.json       # 狙击触发记录
 │   ├── xgb_v2_model.json     # XGBoost 模型
 │   ├── pattern_engine.pkl    # 形态识别模型
 │   ├── transformer_model.pt  # Transformer 模型
@@ -229,12 +275,18 @@ stock-AI-systems/
 | `AUTO_MAX_POSITIONS` | 50 | 最大同时持仓数 |
 | `AI_SELL_SCORE_DROP` | 15 | AI评分衰减卖出确认阈值 |
 | `SCAN_LIMIT` | 0 | 扫描股票上限（0=全量） |
+| `SCAN_WORKERS` | 4 | 扫描/预热并发线程数 |
 | `ENABLE_HEAVY_MODEL` | true | 是否启用重模型(Transformer等) |
 | `HISTORY_DAYS` | 365 | 历史数据拉取天数 |
 | `INITIAL_CAPITAL` | 1000000 | 模拟盘初始资金(元) |
 | `EMAIL_ENABLE` | true | 是否启用邮件通知 |
 | `SMTP_PASSWORD` | 空 | QQ邮箱授权码 |
 | `BAILIAN_API_KEY` | 空 | 百炼大模型API Key |
+| `PUSHPLUS_TOKEN` | 空 | PushPlus微信推送Token |
+| `SNIPER_ENABLED` | false | 盘中狙击引擎开关 |
+| `SNIPER_INTERVAL_SECONDS` | 30 | 狙击引擎检查间隔(秒) |
+| `SNIPER_BUY_ENABLED` | true | 狙击引擎是否执行买入 |
+| `SNIPER_SELL_ENABLED` | true | 狙击引擎是否执行卖出 |
 
 ### 股票观察池
 
@@ -242,7 +294,9 @@ stock-AI-systems/
 
 ---
 
-## 7. 每日收盘任务
+## 7. 每日运行流程
+
+### 7.1 盘后收盘任务
 
 ```powershell
 .\venv\Scripts\Activate.ps1
@@ -252,6 +306,38 @@ python daily_job.py
 功能：增量更新缓存 → AI三层策略扫描 → 自动交易校验/执行 → 持仓检查 → 邮件推送
 
 可配合 Windows 任务计划程序每日自动执行。
+
+### 7.2 盘后生成作战计划
+
+收盘任务完成后，在前端点击：
+
+**模拟交易 → 作战计划 → 生成/刷新作战计划**
+
+或通过命令行：
+
+```powershell
+.\venv\Scripts\Activate.ps1
+python -c "from src.services.sniper_service import generate_battle_plan; generate_battle_plan()"
+```
+
+### 7.3 盘中启动狙击引擎
+
+在服务器上（需要交易时间全程在线）：
+
+```bash
+python run_sniper.py
+```
+
+引擎会在 09:30 开始、15:00 自动退出。每次触发买入/卖出都会通过微信推送通知。
+
+### 7.4 推荐的完整每日流程
+
+```text
+15:30  crontab 执行 daily_job.py（AI扫描 + 自动交易 + 邮件）
+16:00  crontab 执行 generate_battle_plan（生成明日作战计划）
+09:25  crontab 启动 run_sniper.py（盘中狙击引擎）
+15:00  狙击引擎自动退出
+```
 
 ---
 
