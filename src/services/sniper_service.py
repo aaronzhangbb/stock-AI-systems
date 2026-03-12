@@ -23,6 +23,7 @@ from typing import Optional
 
 import config
 from src.data.data_fetcher import batch_get_realtime_prices, get_realtime_price
+from src.trading.auto_trader import AutoTrader
 from src.trading.paper_trading import PaperTradingAccount
 from src.trading.position_monitor import is_trading_time
 from src.trading.decision_kernel import calc_a_share_lot_shares
@@ -128,7 +129,7 @@ def _append_sniper_log(entry: dict):
     write_json_atomic(SNIPER_LOG_PATH, logs)
 
 
-def run_sniper_cycle(account: PaperTradingAccount, plan: dict) -> dict:
+def run_sniper_cycle(account: PaperTradingAccount, plan: dict, trader: AutoTrader = None) -> dict:
     """
     执行一轮狙击检查
 
@@ -136,6 +137,8 @@ def run_sniper_cycle(account: PaperTradingAccount, plan: dict) -> dict:
     """
     result = {"buy_triggered": [], "sell_triggered": []}
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if trader is None:
+        trader = AutoTrader(account)
 
     all_codes = []
     buy_map = {}
@@ -190,14 +193,25 @@ def run_sniper_cycle(account: PaperTradingAccount, plan: dict) -> dict:
             buy_result = account.buy(code, target["stock_name"], price, shares)
             if buy_result.get("success"):
                 target["status"] = "filled"
+                trigger_text = f"现价{price:.2f}落入[{buy_lower:.2f}, {buy_upper:.2f}]"
                 entry = {
                     "time": now_str, "action": "买入", "stock_code": code,
                     "stock_name": target["stock_name"], "price": price,
                     "shares": shares, "ai_score": target.get("ai_score", 0),
-                    "trigger": f"现价{price:.2f}落入[{buy_lower:.2f}, {buy_upper:.2f}]",
+                    "trigger": trigger_text,
                 }
                 result["buy_triggered"].append(entry)
                 _append_sniper_log(entry)
+
+                trader._log_trade(
+                    action="买入", stock_code=code, stock_name=target["stock_name"],
+                    price=price, shares=shares,
+                    reason=f"[狙击买入] {trigger_text}",
+                    ai_score=target.get("ai_score", 0),
+                    stop_price=target.get("sell_stop", 0),
+                    target_price=target.get("sell_target", 0),
+                    trade_id=buy_result.get("trade_id", 0),
+                )
 
                 title = f"[狙击买入] {target['stock_name']}({code}) @{price:.2f}"
                 body = format_buy_html(
@@ -243,6 +257,14 @@ def run_sniper_cycle(account: PaperTradingAccount, plan: dict) -> dict:
                 result["sell_triggered"].append(entry)
                 _append_sniper_log(entry)
 
+                trader._log_trade(
+                    action="卖出", stock_code=code, stock_name=target.get("stock_name", ""),
+                    price=price, shares=shares,
+                    reason=f"[狙击卖出] {trigger_reason}",
+                    pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 2),
+                    trade_id=sell_result.get("trade_id", 0),
+                )
+
                 title = f"[狙击卖出] {target.get('stock_name', '')}({code}) @{price:.2f} {pnl_pct:+.1f}%"
                 body = format_sell_html(
                     target.get("stock_name", ""), code, price, shares,
@@ -268,6 +290,7 @@ def run_sniper_loop():
     logger.info("=" * 50)
 
     account = PaperTradingAccount()
+    trader = AutoTrader(account)
     plan = load_battle_plan()
 
     if not plan or plan.get("plan_date") != datetime.now().strftime("%Y-%m-%d"):
@@ -290,7 +313,7 @@ def run_sniper_loop():
 
         cycle += 1
         try:
-            triggered = run_sniper_cycle(account, plan)
+            triggered = run_sniper_cycle(account, plan, trader=trader)
             n_buy = len(triggered.get("buy_triggered", []))
             n_sell = len(triggered.get("sell_triggered", []))
             if n_buy or n_sell:
